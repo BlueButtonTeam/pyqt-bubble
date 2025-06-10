@@ -831,6 +831,10 @@ class MainWindow(QMainWindow):
         # 设置窗口大小
         self.resize(1400, 900)
         
+        # 添加状态栏
+        self.status_bar = self.statusBar()
+        self.status_bar.showMessage("就绪", 2000)
+        
     def setup_ui(self):
         """设置用户界面"""
         self.setWindowTitle("IntelliAnnotate - 智能图纸标注工具 (EasyOCR)")
@@ -1173,6 +1177,23 @@ class MainWindow(QMainWindow):
         
         toolbar.addSeparator()
         
+        # PDF质量设置
+        toolbar.addWidget(QLabel("PDF质量:"))
+        self.pdf_quality_combo = QComboBox()
+        self.pdf_quality_combo.addItems(["标准 (2x)", "高清 (4x)", "超清 (6x)", "极清 (8x)"])
+        self.pdf_quality_combo.setCurrentText("高清 (4x)")
+        self.pdf_quality_combo.setToolTip(
+            "选择PDF渲染质量:\n"
+            "• 标准 (2x) - 快速加载，适合预览\n"
+            "• 高清 (4x) - 推荐设置，平衡质量和速度\n"
+            "• 超清 (6x) - 高质量，适合详细分析\n"
+            "• 极清 (8x) - 最高质量，加载较慢\n\n"
+            "注意：质量越高，文件加载越慢但图像越清晰"
+        )
+        toolbar.addWidget(self.pdf_quality_combo)
+        
+        toolbar.addSeparator()
+        
         # AI识别按钮
         ai_recognize_action = QAction("AI识别", self)
         ai_recognize_action.triggered.connect(self.simulate_ai_recognition)
@@ -1232,6 +1253,9 @@ class MainWindow(QMainWindow):
         file_path = Path(file_path)
         extension = file_path.suffix.lower()
         
+        # 显示加载状态
+        self.status_bar.showMessage(f"正在加载文件: {file_path.name}...")
+        
         # 清除现有内容
         self.graphics_scene.clear()
         self.clear_annotations()
@@ -1246,20 +1270,35 @@ class MainWindow(QMainWindow):
                                                Qt.KeepAspectRatio)
                     # 设置当前文件路径
                     self.current_file_path = str(file_path)
+                    self.status_bar.showMessage(f"✅ 图像文件加载成功: {file_path.name} ({pixmap.width()}x{pixmap.height()})", 5000)
                 else:
                     QMessageBox.warning(self, "错误", "无法加载图像文件")
+                    self.status_bar.showMessage("❌ 图像文件加载失败", 3000)
                     return
                     
             elif extension == '.pdf':
-                pixmap = FileLoader.load_pdf(str(file_path))
+                # 获取用户选择的PDF质量设置
+                quality_map = {
+                    "标准 (2x)": 2.0,
+                    "高清 (4x)": 4.0,
+                    "超清 (6x)": 6.0,
+                    "极清 (8x)": 8.0
+                }
+                zoom_factor = quality_map.get(self.pdf_quality_combo.currentText(), 4.0)
+                
+                self.status_bar.showMessage(f"正在以 {self.pdf_quality_combo.currentText()} 质量加载PDF...")
+                
+                pixmap = FileLoader.load_pdf(str(file_path), zoom_factor=zoom_factor)
                 if pixmap:
                     self.graphics_scene.addPixmap(pixmap)
                     self.graphics_view.fitInView(self.graphics_scene.itemsBoundingRect(),
                                                Qt.KeepAspectRatio)
                     # 设置当前文件路径
                     self.current_file_path = str(file_path)
+                    self.status_bar.showMessage(f"✅ PDF文件加载成功: {file_path.name} ({pixmap.width()}x{pixmap.height()}, {self.pdf_quality_combo.currentText()})", 5000)
                 else:
                     QMessageBox.warning(self, "错误", "无法加载PDF文件")
+                    self.status_bar.showMessage("❌ PDF文件加载失败", 3000)
                     return
                     
             elif extension == '.dxf':
@@ -1268,14 +1307,17 @@ class MainWindow(QMainWindow):
                                            Qt.KeepAspectRatio)
                 # DXF文件不支持OCR，提示用户
                 self.current_file_path = None
+                self.status_bar.showMessage(f"✅ DXF文件加载成功: {file_path.name} (不支持OCR)", 5000)
                 QMessageBox.information(self, "提示", "DXF文件已加载，但不支持OCR文字识别功能")
                 
             elif extension == '.dwg':
                 QMessageBox.information(self, "提示", "暂不支持DWG格式文件")
+                self.status_bar.showMessage("❌ 不支持DWG格式", 3000)
                 return
                 
             else:
                 QMessageBox.warning(self, "错误", f"不支持的文件格式: {extension}")
+                self.status_bar.showMessage(f"❌ 不支持的文件格式: {extension}", 3000)
                 return
                 
             # 启用OCR按钮（仅对图像和PDF文件）
@@ -1283,6 +1325,7 @@ class MainWindow(QMainWindow):
                 
         except Exception as e:
             QMessageBox.critical(self, "错误", f"加载文件时发生错误: {str(e)}")
+            self.status_bar.showMessage(f"❌ 加载文件失败: {str(e)}", 5000)
             self.current_file_path = None
 
     def simulate_ai_recognition(self):
@@ -1694,34 +1737,93 @@ class FileLoader:
             return None
     
     @staticmethod
-    def load_pdf(file_path: str, page_num: int = 0) -> Optional[QPixmap]:
-        """加载PDF文件"""
+    def load_pdf(file_path: str, zoom_factor: float = 4.0, page_num: int = 0) -> Optional[QPixmap]:
+        """加载PDF文件（高清晰度优化版）"""
         if not HAS_OCR_SUPPORT:
             return None
             
         try:
             import fitz
+            print(f"正在以 {zoom_factor}x 分辨率加载PDF...")
+            
             doc = fitz.open(file_path)
             if page_num >= len(doc):
                 page_num = 0
             
             page = doc.load_page(page_num)
             
-            # 设置合适的分辨率
-            zoom = 2.0  # 增加分辨率
-            mat = fitz.Matrix(zoom, zoom)
-            pix = page.get_pixmap(matrix=mat)
+            # 设置高分辨率渲染参数
+            mat = fitz.Matrix(zoom_factor, zoom_factor)
             
-            # 转换为QPixmap
-            img_data = pix.pil_tobytes(format="PNG")
-            pixmap = QPixmap()
-            pixmap.loadFromData(img_data)
+            print(f"开始渲染PDF页面 (分辨率倍数: {zoom_factor}x)...")
+            
+            # 使用高质量渲染选项
+            pix = page.get_pixmap(
+                matrix=mat,
+                alpha=False,  # 不需要透明度通道，提高性能
+                annots=True,  # 包含注释
+                clip=None     # 不裁剪
+            )
+            
+            # 获取图像数据
+            img_data = pix.tobytes("png")
+            
+            print(f"PDF页面渲染完成，尺寸: {pix.width}x{pix.height}")
+            
+            # 如果有PIL支持，进行额外的图像优化
+            if Image is not None:
+                try:
+                    print("正在进行图像后处理优化...")
+                    # 使用PIL进行图像后处理优化
+                    import io
+                    pil_image = Image.open(io.BytesIO(img_data))
+                    
+                    # 应用锐化滤镜提高文字清晰度
+                    from PIL import ImageFilter, ImageEnhance
+                    
+                    # 轻微锐化
+                    pil_image = pil_image.filter(ImageFilter.UnsharpMask(
+                        radius=1.0,      # 锐化半径
+                        percent=120,     # 锐化强度
+                        threshold=1      # 锐化阈值
+                    ))
+                    
+                    # 增强对比度，让文字更清晰
+                    enhancer = ImageEnhance.Contrast(pil_image)
+                    pil_image = enhancer.enhance(1.1)  # 轻微增强对比度
+                    
+                    # 转换回QPixmap
+                    buffer = io.BytesIO()
+                    pil_image.save(buffer, format='PNG', quality=100, optimize=True)
+                    buffer.seek(0)
+                    
+                    pixmap = QPixmap()
+                    pixmap.loadFromData(buffer.getvalue())
+                    
+                    print("图像后处理优化完成")
+                    
+                except Exception as e:
+                    print(f"PIL图像后处理失败，使用原始渲染: {e}")
+                    # 如果PIL处理失败，回退到原始方法
+                    pixmap = QPixmap()
+                    pixmap.loadFromData(img_data)
+            else:
+                # 没有PIL支持时的原始方法
+                pixmap = QPixmap()
+                pixmap.loadFromData(img_data)
             
             doc.close()
+            
+            # 检查是否成功加载
+            if pixmap.isNull():
+                print("警告: PDF渲染结果为空")
+                return None
+                
+            print(f"✅ PDF加载成功 - 渲染尺寸: {pix.width}x{pix.height}, 最终尺寸: {pixmap.width()}x{pixmap.height()}")
             return pixmap
             
         except Exception as e:
-            print(f"加载PDF失败: {e}")
+            print(f"❌ 加载PDF失败: {e}")
             return None
     
     @staticmethod
