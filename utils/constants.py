@@ -67,24 +67,41 @@ ANNOTATION_STYLES = {
 
 # OCR文本类型颜色映射
 OCR_TEXT_TYPE_COLORS = {
-    'thread_spec': (255, 0, 0, 100),      # 红色 - 螺纹规格
-    'diameter': (0, 255, 0, 100),         # 绿色 - 直径标注
-    'dimension': (0, 0, 255, 100),        # 蓝色 - 尺寸标注
-    'angle': (255, 255, 0, 100),          # 黄色 - 角度标注
-    'number': (255, 0, 255, 100),         # 紫色 - 数值
-    'material': (0, 255, 255, 100),       # 青色 - 材料
-    'surface_treatment': (255, 165, 0, 100),  # 橙色 - 表面处理
-    'annotation': (128, 128, 128, 100)    # 灰色 - 普通标注
+    'thread_spec': (220, 20, 60, 120),        # 红色 - 螺纹规格(最重要)
+    'diameter': (34, 139, 34, 120),           # 绿色 - 直径标注
+    'dimension': (0, 100, 255, 120),          # 蓝色 - 尺寸标注
+    'tolerance': (138, 43, 226, 120),         # 紫色 - 公差等级
+    'surface_roughness': (255, 140, 0, 120),  # 深橙色 - 表面粗糙度
+    'angle': (255, 215, 0, 120),              # 金色 - 角度标注
+    'material': (0, 191, 255, 120),           # 深天蓝色 - 材料标记
+    'surface_treatment': (255, 20, 147, 120), # 深粉色 - 表面处理
+    'geometry': (50, 205, 50, 120),           # 酸橙绿色 - 几何特征
+    'measurement': (70, 130, 180, 120),       # 钢蓝色 - 测量值
+    'position': (255, 99, 71, 120),           # 番茄色 - 位置标记
+    'number': (147, 112, 219, 120),           # 中紫色 - 数值
+    'label': (169, 169, 169, 120),            # 暗灰色 - 标签
+    'symbol': (255, 165, 0, 120),             # 橙色 - 符号
+    'title': (25, 25, 112, 120),              # 午夜蓝色 - 标题
+    'annotation': (128, 128, 128, 120)        # 灰色 - 普通标注
 }
 
 # OCR文本类型到标注样式的映射
 OCR_TYPE_TO_STYLE = {
-    'thread_spec': 'error',      # 螺纹规格用红色
-    'diameter': 'success',       # 直径标注用绿色
-    'dimension': 'default',      # 尺寸标注用默认
-    'angle': 'warning',          # 角度标注用警告色
-    'material': 'success',       # 材料用绿色
-    'surface_treatment': 'warning'  # 表面处理用警告色
+    'thread_spec': 'error',         # 螺纹规格用红色
+    'diameter': 'success',          # 直径标注用绿色
+    'dimension': 'default',         # 尺寸标注用默认
+    'tolerance': 'warning',         # 公差等级用警告色
+    'surface_roughness': 'warning', # 表面粗糙度用警告色
+    'angle': 'warning',             # 角度标注用警告色
+    'material': 'success',          # 材料用绿色
+    'surface_treatment': 'warning', # 表面处理用警告色
+    'geometry': 'success',          # 几何特征用绿色
+    'measurement': 'default',       # 测量值用默认
+    'position': 'warning',          # 位置标记用警告色
+    'number': 'default',            # 数值用默认
+    'label': 'default',             # 标签用默认
+    'symbol': 'warning',            # 符号用警告色
+    'title': 'error'                # 标题用红色
 }
 
 # 样式名称映射
@@ -104,18 +121,28 @@ STYLE_NAME_REVERSE_MAP = {
 
 # OCR筛选选项
 OCR_FILTER_OPTIONS = [
-    "全部", "螺纹规格", "直径标注", "尺寸标注", 
-    "角度标注", "数值", "材料标记", "表面处理"
+    "全部", "螺纹规格", "直径标注", "尺寸标注", "公差等级", 
+    "表面粗糙度", "角度标注", "材料标记", "表面处理", 
+    "几何特征", "测量值", "位置标记", "数值", "标签", 
+    "符号", "标题"
 ]
 
 OCR_FILTER_TYPE_MAP = {
     "螺纹规格": "thread_spec",
     "直径标注": "diameter", 
     "尺寸标注": "dimension",
+    "公差等级": "tolerance",
+    "表面粗糙度": "surface_roughness",
     "角度标注": "angle",
-    "数值": "number",
     "材料标记": "material",
-    "表面处理": "surface_treatment"
+    "表面处理": "surface_treatment",
+    "几何特征": "geometry",
+    "测量值": "measurement",
+    "位置标记": "position",
+    "数值": "number",
+    "标签": "label",
+    "符号": "symbol",
+    "标题": "title"
 }
 
 # 界面样式常量

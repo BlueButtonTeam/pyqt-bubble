@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-OCR识别工作线程模块
+OCR识别工作线程模块 - 增强版
+针对机械图纸进行深度优化的OCR识别系统
 """
 
 import re
@@ -23,7 +24,7 @@ class OCRWorkerSignals(QObject):
 
 
 class OCRWorker(QRunnable):
-    """OCR识别工作线程"""
+    """OCR识别工作线程 - 增强版"""
     
     def __init__(self, image_path: str, languages: list = ['ch_sim', 'en']):
         super().__init__()
@@ -33,121 +34,245 @@ class OCRWorker(QRunnable):
         self._reader = None
         
     def run(self):
-        """执行OCR识别"""
+        """执行OCR识别 - 多策略增强版"""
         if not HAS_OCR_SUPPORT:
             self.signals.error.emit("OCR功能未启用，请安装完整依赖包")
             return
             
         try:
-            # 初始化EasyOCR
-            self.signals.progress.emit(10)
-            self._reader = easyocr.Reader(self.languages, gpu=torch.cuda.is_available())
+            # 初始化EasyOCR（优化版）
+            if not self._reader:
+                self.signals.progress.emit(5)
+                print("🔧 正在初始化增强版EasyOCR...")
+                
+                # 配置EasyOCR参数以提高精度
+                gpu_available = torch.cuda.is_available()
+                print(f"🖥️  GPU可用: {gpu_available}")
+                
+                self._reader = easyocr.Reader(
+                    self.languages, 
+                    gpu=gpu_available,
+                    verbose=False,          # 减少输出
+                    quantize=True,          # 启用量化以提高性能
+                    download_enabled=True   # 允许下载模型
+                )
+                print("✅ 增强版EasyOCR初始化完成")
             
-            self.signals.progress.emit(30)
+            self.signals.progress.emit(15)
             
-            # 读取图像
-            if self.image_path.lower().endswith('.pdf'):
-                # 处理PDF文件
-                image = self._extract_image_from_pdf()
+            # 读取图像（重要：使用与显示相同的方法和参数）
+            print(f"📖 正在读取图像: {self.image_path}")
+            
+            # 重要修复：直接使用图像路径，让EasyOCR自己处理
+            # 这样可以确保OCR处理的图像与界面显示的图像坐标系统一致
+            
+            self.signals.progress.emit(25)
+            
+            print("🔍 开始OCR识别...")
+            
+            # 直接对图像文件进行OCR识别，不进行额外的图像预处理
+            # 这样可以确保坐标系统的一致性
+            try:
+                # 使用EasyOCR直接读取文件，让它自己处理所有预处理
+                results = self._reader.readtext(
+                    self.image_path,
+                    detail=1,
+                    width_ths=0.7,      # 文本宽度阈值
+                    height_ths=0.7,     # 文本高度阈值
+                    paragraph=False,    # 不合并段落
+                    min_size=8,         # 最小文本尺寸
+                    text_threshold=0.6, # 文本置信度阈值
+                    low_text=0.3,       # 低文本阈值
+                    link_threshold=0.3, # 连接阈值
+                    canvas_size=2560,   # 画布大小
+                    mag_ratio=1.8       # 放大比例
+                )
+                
+                print(f"  📝 主识别方法识别到 {len(results)} 个文本")
+                
+                # 为结果添加方法标识
+                all_results = []
+                for result in results:
+                    result_list = list(result)
+                    result_list.append("primary_method")
+                    all_results.append(result_list)
+                    
+            except Exception as e:
+                print(f"  ⚠️ 主识别方法失败: {e}")
+                all_results = []
+            
+            self.signals.progress.emit(75)
+            
+            # 如果主方法失败或结果太少，尝试备用方法
+            if len(all_results) < 5:
+                print("🔄 结果较少，尝试备用识别策略...")
+                try:
+                    # 只有在主方法失败时才进行图像预处理
+                    if self.image_path.lower().endswith('.pdf'):
+                        # 对于PDF，需要先提取图像
+                        image = self._extract_image_from_pdf_with_same_scale()
+                    else:
+                        image = cv2.imread(self.image_path)
+                    
+                    if image is not None:
+                        # 简单的图像增强
+                        processed_images = self._simple_preprocessing(image)
+                        
+                        for i, processed_img in enumerate(processed_images[:2]):  # 只尝试前2种方法
+                            try:
+                                backup_results = self._reader.readtext(
+                                    processed_img,
+                                    detail=1,
+                                    width_ths=0.7,
+                                    height_ths=0.7,
+                                    paragraph=False,
+                                    min_size=8,
+                                    text_threshold=0.5,  # 稍微降低阈值
+                                    low_text=0.3,
+                                    link_threshold=0.3,
+                                    canvas_size=2560,
+                                    mag_ratio=1.8
+                                )
+                                
+                                for result in backup_results:
+                                    result_list = list(result)
+                                    result_list.append(f"backup_method_{i}")
+                                    all_results.append(result_list)
+                                
+                                print(f"  📝 备用方法{i+1}识别到 {len(backup_results)} 个文本")
+                                
+                            except Exception as e:
+                                print(f"  ⚠️ 备用方法{i+1}失败: {e}")
+                                continue
+                        
+                except Exception as e:
+                    print(f"  ⚠️ 备用识别策略失败: {e}")
+            
+            # 处理识别结果（如果有图像的话用于获取尺寸信息）
+            if all_results:
+                try:
+                    # 获取图像尺寸用于处理
+                    if self.image_path.lower().endswith('.pdf'):
+                        temp_image = self._extract_image_from_pdf_with_same_scale()
+                        image_shape = temp_image.shape if temp_image is not None else (1000, 1000, 3)
+                    else:
+                        temp_image = cv2.imread(self.image_path)
+                        image_shape = temp_image.shape if temp_image is not None else (1000, 1000, 3)
+                except:
+                    image_shape = (1000, 1000, 3)  # 默认尺寸
+                
+                print("🔧 正在处理识别结果...")
+                processed_results = self._process_ocr_results(all_results, image_shape)
+                
+                self.signals.progress.emit(90)
+                
+                # 最终结果筛选和排序
+                print("🎯 正在进行最终结果筛选...")
+                final_results = self._final_result_filtering(processed_results)
+                
+                print(f"✅ OCR识别完成！最终识别到 {len(final_results)} 个有效文本")
             else:
-                # 处理普通图像文件
-                image = cv2.imread(self.image_path)
-                
-            if image is None:
-                raise ValueError(f"无法读取图像文件: {self.image_path}")
-                
-            self.signals.progress.emit(50)
-            
-            # 图像预处理 - 针对机械图纸优化
-            processed_image = self._preprocess_mechanical_drawing(image)
-            
-            self.signals.progress.emit(70)
-            
-            # 执行OCR识别
-            results = self._reader.readtext(processed_image, detail=1)
-            
-            self.signals.progress.emit(90)
-            
-            # 处理识别结果
-            processed_results = self._process_ocr_results(results, image.shape)
+                print("⚠️ 没有识别到任何文本")
+                final_results = []
             
             self.signals.progress.emit(100)
-            self.signals.finished.emit(processed_results)
+            self.signals.finished.emit(final_results)
             
         except Exception as e:
-            self.signals.error.emit(f"OCR识别失败: {str(e)}")
+            error_msg = f"OCR识别失败: {str(e)}"
+            print(f"❌ {error_msg}")
+            self.signals.error.emit(error_msg)
     
-    def _extract_image_from_pdf(self):
-        """从PDF中提取图像"""
-        doc = fitz.open(self.image_path)
-        page = doc[0]  # 获取第一页
-        mat = fitz.Matrix(2.0, 2.0)  # 2倍缩放提高质量
-        pix = page.get_pixmap(matrix=mat)
-        img_data = pix.tobytes("png")
-        
-        # 转换为OpenCV格式
-        nparr = np.frombuffer(img_data, np.uint8)
-        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        doc.close()
-        return image
+    def _extract_image_from_pdf_with_same_scale(self):
+        """从PDF中提取图像 - 使用与显示相同的缩放比例"""
+        try:
+            # 重要：这个方法现在应该尽量与FileLoader.load_pdf保持一致的缩放
+            doc = fitz.open(self.image_path)
+            page = doc[0]  # 获取第一页
+            
+            # 使用标准4倍缩放（与默认PDF加载一致）
+            mat = fitz.Matrix(4.0, 4.0)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img_data = pix.tobytes("png")
+            
+            # 转换为OpenCV格式
+            nparr = np.frombuffer(img_data, np.uint8)
+            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            doc.close()
+            return image
+        except Exception as e:
+            print(f"PDF图像提取失败: {e}")
+            return None
     
-    def _preprocess_mechanical_drawing(self, image):
-        """机械图纸预处理 - 专门针对紧固件图纸优化"""
+    def _simple_preprocessing(self, image):
+        """简单的图像预处理 - 只使用最有效的几种方法"""
         # 转换为灰度图
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
             gray = image.copy()
         
-        # 增强对比度
+        processed_images = []
+        
+        # 方法1: 基础CLAHE + 自适应阈值
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         enhanced = clahe.apply(gray)
-        
-        # 降噪
         denoised = cv2.bilateralFilter(enhanced, 9, 75, 75)
-        
-        # 自适应阈值化 - 对机械图纸文字效果好
         adaptive_thresh = cv2.adaptiveThreshold(
             denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
             cv2.THRESH_BINARY, 11, 2
         )
+        processed_images.append(adaptive_thresh)
         
-        # 形态学操作 - 连接断开的文字
-        kernel = np.ones((2,2), np.uint8)
-        processed = cv2.morphologyEx(adaptive_thresh, cv2.MORPH_CLOSE, kernel)
+        # 方法2: 强化对比度 + Otsu阈值
+        clahe_strong = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8,8))
+        enhanced_strong = clahe_strong.apply(gray)
+        blurred = cv2.GaussianBlur(enhanced_strong, (3, 3), 0)
+        _, otsu_thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        processed_images.append(otsu_thresh)
         
-        return processed
+        return processed_images
     
     def _process_ocr_results(self, results, image_shape):
-        """处理OCR识别结果"""
+        """处理OCR识别结果 - 智能合并和去重"""
         processed_results = []
         height, width = image_shape[:2]
         
+        # 第一轮：基础处理和筛选
+        initial_results = []
         for result in results:
-            bbox, text, confidence = result
+            # 解析结果格式 [bbox, text, confidence, method_id]
+            if len(result) >= 3:
+                bbox, text, confidence = result[0], result[1], result[2]
+                method_id = result[3] if len(result) > 3 else "unknown"
+            else:
+                continue
             
-            # 过滤低置信度和无意义文本
-            if confidence < 0.3:
+            # 动态置信度阈值
+            min_confidence = self._get_dynamic_confidence_threshold(text, bbox)
+            if confidence < min_confidence:
                 continue
                 
             # 清理文本
             clean_text = self._clean_text(text)
-            if not clean_text or len(clean_text.strip()) < 2:
+            if not clean_text or len(clean_text.strip()) < 1:
                 continue
             
-            # 计算边界框中心点
+            # 计算边界框信息
             bbox_array = np.array(bbox)
             center_x = int(np.mean(bbox_array[:, 0]))
             center_y = int(np.mean(bbox_array[:, 1]))
-            
-            # 计算边界框尺寸
             bbox_width = int(np.max(bbox_array[:, 0]) - np.min(bbox_array[:, 0]))
             bbox_height = int(np.max(bbox_array[:, 1]) - np.min(bbox_array[:, 1]))
             
-            # 识别文本类型（针对机械图纸）
+            # 过滤太小的检测结果（可能是噪声）
+            if bbox_width < 8 or bbox_height < 6:
+                continue
+            
+            # 识别文本类型
             text_type = self._classify_mechanical_text(clean_text)
             
-            processed_results.append({
+            initial_results.append({
                 'text': clean_text,
                 'confidence': confidence,
                 'center_x': center_x,
@@ -156,62 +281,522 @@ class OCRWorker(QRunnable):
                 'bbox_height': bbox_height,
                 'bbox': bbox,
                 'text_type': text_type,
-                'original_text': text
+                'original_text': text,
+                'method_id': method_id
             })
+        
+        # 第二轮：去重和合并
+        processed_results = self._merge_duplicate_detections(initial_results)
+        
+        # 第三轮：上下文优化
+        processed_results = self._apply_context_optimization(processed_results)
         
         return processed_results
     
+    def _get_dynamic_confidence_threshold(self, text, bbox):
+        """根据文本内容和框大小动态确定置信度阈值"""
+        # 基础阈值
+        base_threshold = 0.25
+        
+        # 根据文本长度调整
+        text_length = len(text.strip())
+        if text_length == 1:
+            return 0.45  # 单字符需要更高置信度
+        elif text_length == 2:
+            return 0.35  # 双字符需要中等置信度
+        elif text_length <= 4:
+            return 0.3   # 短文本
+        
+        # 根据边界框大小调整
+        bbox_array = np.array(bbox)
+        bbox_area = (np.max(bbox_array[:, 0]) - np.min(bbox_array[:, 0])) * \
+                   (np.max(bbox_array[:, 1]) - np.min(bbox_array[:, 1]))
+        
+        if bbox_area < 150:  # 小字体需要更高置信度
+            return base_threshold + 0.1
+        elif bbox_area > 1000:  # 大字体可以放宽要求
+            return max(base_threshold - 0.05, 0.2)
+        
+        return base_threshold
+    
+    def _merge_duplicate_detections(self, results):
+        """智能合并重复检测的文本"""
+        if not results:
+            return results
+        
+        merged_results = []
+        used_indices = set()
+        
+        for i, result1 in enumerate(results):
+            if i in used_indices:
+                continue
+            
+            # 寻找重叠的检测结果
+            overlapping = [result1]
+            used_indices.add(i)
+            
+            for j, result2 in enumerate(results[i+1:], i+1):
+                if j in used_indices:
+                    continue
+                
+                # 计算重叠程度
+                overlap_ratio = self._calculate_bbox_overlap(result1['bbox'], result2['bbox'])
+                
+                # 如果重叠度高且文本相似
+                if overlap_ratio > 0.3 and self._texts_similar(result1['text'], result2['text']):
+                    overlapping.append(result2)
+                    used_indices.add(j)
+                # 位置相近且文本类型相同的也可能是同一个目标
+                elif (self._positions_close(result1, result2) and 
+                      result1['text_type'] == result2['text_type'] and
+                      self._texts_similar(result1['text'], result2['text'])):
+                    overlapping.append(result2)
+                    used_indices.add(j)
+            
+            # 合并重叠的检测结果
+            if len(overlapping) == 1:
+                merged_results.append(overlapping[0])
+            else:
+                merged_result = self._merge_overlapping_results(overlapping)
+                merged_results.append(merged_result)
+        
+        return merged_results
+    
+    def _positions_close(self, result1, result2, threshold=50):
+        """判断两个检测结果的位置是否相近"""
+        distance = ((result1['center_x'] - result2['center_x']) ** 2 + 
+                   (result1['center_y'] - result2['center_y']) ** 2) ** 0.5
+        return distance < threshold
+    
+    def _calculate_bbox_overlap(self, bbox1, bbox2):
+        """计算两个边界框的重叠比例"""
+        bbox1_array = np.array(bbox1)
+        bbox2_array = np.array(bbox2)
+        
+        x1_min, y1_min = np.min(bbox1_array, axis=0)
+        x1_max, y1_max = np.max(bbox1_array, axis=0)
+        
+        x2_min, y2_min = np.min(bbox2_array, axis=0)
+        x2_max, y2_max = np.max(bbox2_array, axis=0)
+        
+        # 计算交集
+        inter_x_min = max(x1_min, x2_min)
+        inter_y_min = max(y1_min, y2_min)
+        inter_x_max = min(x1_max, x2_max)
+        inter_y_max = min(y1_max, y2_max)
+        
+        if inter_x_max <= inter_x_min or inter_y_max <= inter_y_min:
+            return 0.0
+        
+        inter_area = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
+        
+        # 计算并集
+        area1 = (x1_max - x1_min) * (y1_max - y1_min)
+        area2 = (x2_max - x2_min) * (y2_max - y2_min)
+        union_area = area1 + area2 - inter_area
+        
+        return inter_area / union_area if union_area > 0 else 0.0
+    
+    def _texts_similar(self, text1, text2):
+        """判断两个文本是否相似"""
+        text1_clean = text1.strip().lower()
+        text2_clean = text2.strip().lower()
+        
+        # 完全相同
+        if text1_clean == text2_clean:
+            return True
+        
+        # 一个是另一个的子串
+        if text1_clean in text2_clean or text2_clean in text1_clean:
+            return True
+        
+        # 编辑距离判断
+        max_len = max(len(text1_clean), len(text2_clean))
+        if max_len <= 3:
+            return abs(len(text1_clean) - len(text2_clean)) <= 1
+        
+        distance = self._levenshtein_distance(text1_clean, text2_clean)
+        similarity = 1 - distance / max_len
+        
+        return similarity > 0.75
+    
+    def _levenshtein_distance(self, s1, s2):
+        """计算编辑距离"""
+        if len(s1) > len(s2):
+            s1, s2 = s2, s1
+        
+        distances = range(len(s1) + 1)
+        for i2, c2 in enumerate(s2):
+            distances_ = [i2 + 1]
+            for i1, c1 in enumerate(s1):
+                if c1 == c2:
+                    distances_.append(distances[i1])
+                else:
+                    distances_.append(1 + min((distances[i1], distances[i1 + 1], distances_[-1])))
+            distances = distances_
+        return distances[-1]
+    
+    def _merge_overlapping_results(self, overlapping_results):
+        """智能合并重叠的识别结果"""
+        # 选择置信度最高的作为主结果
+        best_result = max(overlapping_results, key=lambda x: x['confidence'])
+        
+        # 如果有更长且置信度不太低的文本，优先使用
+        for result in overlapping_results:
+            if (len(result['text']) > len(best_result['text']) and 
+                result['confidence'] > 0.3 and
+                result['confidence'] > best_result['confidence'] * 0.7):
+                best_result['text'] = result['text']
+                break
+        
+        # 保留最高的置信度
+        best_result['confidence'] = max(r['confidence'] for r in overlapping_results)
+        
+        return best_result
+    
+    def _apply_context_optimization(self, results):
+        """应用上下文优化"""
+        optimized_results = []
+        
+        for result in results:
+            # 优化特定类型的文本
+            if result['text_type'] == 'number':
+                # 数字优化：移除非数字字符
+                number_match = re.search(r'\d+\.?\d*', result['text'])
+                if number_match:
+                    result['text'] = number_match.group()
+            
+            elif result['text_type'] == 'thread_spec':
+                # 螺纹规格优化
+                result['text'] = self._optimize_thread_spec(result['text'])
+            
+            elif result['text_type'] == 'diameter':
+                # 直径标注优化
+                result['text'] = self._optimize_diameter_notation(result['text'])
+            
+            elif result['text_type'] == 'dimension':
+                # 尺寸标注优化
+                result['text'] = self._optimize_dimension_notation(result['text'])
+            
+            # 重新分类（可能因为优化而改变）
+            result['text_type'] = self._classify_mechanical_text(result['text'])
+            
+            if result['text'].strip():  # 确保优化后仍有内容
+                optimized_results.append(result)
+        
+        return optimized_results
+    
+    def _optimize_thread_spec(self, text):
+        """优化螺纹规格识别"""
+        # 常见的螺纹规格模式
+        patterns = [
+            r'M(\d+(?:\.\d+)?)',  # M8, M10, M12.5 等
+            r'(\d+)M',            # 反向识别：8M -> M8
+            r'M(\d+)[xX×](\d+(?:\.\d+)?)',  # M8×1.25
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                if pattern.startswith('M'):
+                    if len(match.groups()) == 2:
+                        return f"M{match.group(1)}×{match.group(2)}"
+                    else:
+                        return f"M{match.group(1)}"
+                else:
+                    return f"M{match.group(1)}"
+        
+        return text
+    
+    def _optimize_diameter_notation(self, text):
+        """优化直径标注识别"""
+        # 提取数字部分
+        numbers = re.findall(r'\d+\.?\d*', text)
+        if numbers:
+            return f"Φ{numbers[0]}"
+        return text
+    
+    def _optimize_dimension_notation(self, text):
+        """优化尺寸标注识别"""
+        # 标准化乘号
+        text = re.sub(r'[xX*]', '×', text)
+        # 标准化正负号
+        text = re.sub(r'[±+\-]', '±', text)
+        return text
+    
+    def _final_result_filtering(self, results):
+        """最终结果筛选和排序"""
+        if not results:
+            return results
+        
+        # 按置信度和文本类型重要性排序
+        type_priority = {
+            'thread_spec': 10,      # 螺纹规格最重要
+            'diameter': 9,          # 直径标注
+            'dimension': 8,         # 尺寸标注
+            'tolerance': 7,         # 公差等级
+            'surface_roughness': 6, # 表面粗糙度
+            'angle': 5,             # 角度标注
+            'material': 4,          # 材料标记
+            'surface_treatment': 3, # 表面处理
+            'geometry': 2,          # 几何特征
+            'measurement': 1.5,     # 测量值
+            'number': 1,            # 纯数值
+            'position': 0.8,        # 位置标记
+            'label': 0.6,           # 标签
+            'annotation': 0.4       # 普通标注
+        }
+        
+        # 计算综合得分
+        for result in results:
+            type_score = type_priority.get(result['text_type'], 0)
+            confidence_score = result['confidence']
+            
+            # 文本长度奖励（适中长度的文本更可能是有效信息）
+            text_len = len(result['text'])
+            length_score = 1.0
+            if 2 <= text_len <= 12:
+                length_score = 1.3
+            elif text_len == 1:
+                length_score = 0.7
+            elif text_len > 20:
+                length_score = 0.8
+            
+            # 文本复杂度奖励（包含特殊符号的文本更重要）
+            complexity_score = 1.0
+            special_chars = ['Φ', '×', '°', '±', 'M', 'R']
+            if any(char in result['text'] for char in special_chars):
+                complexity_score = 1.2
+            
+            # 综合得分
+            result['final_score'] = (type_score * 0.4 + confidence_score * 0.3 + 
+                                   length_score * 0.2 + complexity_score * 0.1)
+        
+        # 按得分排序
+        results.sort(key=lambda x: x['final_score'], reverse=True)
+        
+        # 过滤低分结果
+        min_score = 0.4  # 降低阈值以保留更多可能有用的结果
+        filtered_results = [r for r in results if r['final_score'] >= min_score]
+        
+        return filtered_results
+    
     def _clean_text(self, text):
-        """清理识别的文本"""
-        # 移除多余空格和特殊字符
+        """清理识别的文本 - 增强版"""
+        # 移除多余空格和换行符
         text = re.sub(r'\s+', ' ', text.strip())
         
         # 修正常见的OCR错误（针对机械图纸）
         corrections = {
-            'Φ': 'Φ',  # 直径符号
-            '∅': 'Φ',
-            'ø': 'Φ',
-            'M': 'M',   # 螺纹标记
-            '×': '×',   # 乘号
-            '°': '°',   # 度数符号
+            # 直径符号修正
+            'Φ': 'Φ', '∅': 'Φ', 'ø': 'Φ', 'O': 'Φ', '0': 'Φ',
+            '①': 'Φ', '◯': 'Φ', '○': 'Φ',
+            
+            # 螺纹标记修正
+            'M': 'M', 'W': 'M', 'N': 'M', 'H': 'M',
+            
+            # 数字修正
+            'I': '1', 'l': '1', '|': '1', 'S': '5', 'G': '6', 'B': '8', 'g': '9',
+            'O': '0', 'o': '0', 'D': '0',
+            
+            # 符号修正
+            '×': '×', 'x': '×', 'X': '×', '*': '×',
+            '°': '°', 'o': '°', '˚': '°', '。': '°',
+            
+            # 小数点修正
+            ',': '.', '·': '.', '｡': '.',
+            
+            # 连接符修正
+            '-': '-', '—': '-', '–': '-', '_': '-',
         }
         
+        # 应用修正
         for wrong, correct in corrections.items():
             text = text.replace(wrong, correct)
+        
+        # 特殊处理：螺纹规格修正
+        thread_patterns = [
+            (r'(\d+)(\s*)[MmWwNnHh]', r'M\1'),  # 数字后跟字母
+            (r'[MmWwNnHh](\s*)(\d+)', r'M\2'),  # 字母后跟数字
+        ]
+        
+        for pattern, replacement in thread_patterns:
+            text = re.sub(pattern, replacement, text)
+        
+        # 特殊处理：直径标注修正
+        diameter_patterns = [
+            (r'([ΦΦ∅ø○◯①OG0D])(\s*)(\d+\.?\d*)', r'Φ\3'),  # 符号后跟数字
+            (r'(\d+\.?\d*)(\s*)([ΦΦ∅ø○◯①OG0D])', r'Φ\1'),  # 数字后跟符号
+        ]
+        
+        for pattern, replacement in diameter_patterns:
+            text = re.sub(pattern, replacement, text)
+        
+        # 清理多余的空格和标点
+        text = re.sub(r'\s+', ' ', text.strip())
+        text = re.sub(r'([a-zA-Z])(\d)', r'\1\2', text)  # 字母和数字之间不要空格
+        text = re.sub(r'(\d)([a-zA-Z])', r'\1\2', text)  # 数字和字母之间不要空格
         
         return text
     
     def _classify_mechanical_text(self, text):
-        """分类机械图纸文本类型"""
-        # 螺纹规格
-        if re.match(r'M\d+', text, re.IGNORECASE):
-            return 'thread_spec'
+        """分类机械图纸文本类型 - 增强版"""
+        clean_text = text.strip()
         
-        # 直径标注
-        if 'Φ' in text or '∅' in text or 'ø' in text:
-            return 'diameter'
+        # 1. 螺纹规格 (最高优先级)
+        thread_patterns = [
+            r'^M\d+(?:\.\d+)?(?:\s*[xX×]\s*\d+(?:\.\d+)?)?$',  # M8, M10, M12×1.5
+            r'^M\d+(?:\.\d+)?(?:-\d+(?:\.\d+)?)?$',          # M8-1.25
+            r'^\d+M$',                                        # 8M格式
+        ]
+        for pattern in thread_patterns:
+            if re.match(pattern, clean_text, re.IGNORECASE):
+                return 'thread_spec'
         
-        # 尺寸标注
-        if re.search(r'\d+\.?\d*\s*[×x]\s*\d+\.?\d*', text):
-            return 'dimension'
+        # 2. 直径标注
+        diameter_patterns = [
+            r'^Φ\d+(?:\.\d+)?$',           # Φ8, Φ10.5
+            r'^∅\d+(?:\.\d+)?$',           # ∅8
+            r'^ø\d+(?:\.\d+)?$',           # ø8
+            r'^\d+(?:\.\d+)?Φ$',           # 8Φ格式
+        ]
+        for pattern in diameter_patterns:
+            if re.match(pattern, clean_text):
+                return 'diameter'
         
-        # 角度标注
-        if '°' in text and any(c.isdigit() for c in text):
-            return 'angle'
+        # 3. 复合尺寸标注
+        dimension_patterns = [
+            r'^\d+(?:\.\d+)?\s*[×xX]\s*\d+(?:\.\d+)?$',                    # 20×30
+            r'^\d+(?:\.\d+)?\s*[×xX]\s*\d+(?:\.\d+)?\s*[×xX]\s*\d+(?:\.\d+)?$',  # 20×30×40
+            r'^\d+(?:\.\d+)?[-]\d+(?:\.\d+)?$',                              # 20-30
+            r'^\d+(?:\.\d+)?\+\d+(?:\.\d+)?$',                             # 20+0.5
+            r'^\d+(?:\.\d+)?±\d+(?:\.\d+)?$',                              # 20±0.1
+        ]
+        for pattern in dimension_patterns:
+            if re.match(pattern, clean_text):
+                return 'dimension'
         
-        # 数值
-        if re.match(r'^\d+\.?\d*$', text):
-            return 'number'
+        # 4. 角度标注
+        angle_patterns = [
+            r'^\d+(?:\.\d+)?°$',           # 30°, 45.5°
+            r'^\d+(?:\.\d+)?\s*度$',       # 30度
+            r'^\d+(?:\.\d+)?′$',           # 30′ (分)
+            r'^\d+(?:\.\d+)?″$',           # 30″ (秒)
+        ]
+        for pattern in angle_patterns:
+            if re.match(pattern, clean_text):
+                return 'angle'
         
-        # 材料标记
-        material_keywords = ['钢', '铁', '铜', '铝', '不锈钢', 'steel', 'iron', 'copper', 'aluminum']
-        if any(keyword.lower() in text.lower() for keyword in material_keywords):
-            return 'material'
+        # 5. 表面粗糙度
+        roughness_patterns = [
+            r'^Ra\d+(?:\.\d+)?$',          # Ra3.2
+            r'^Rz\d+(?:\.\d+)?$',          # Rz12.5
+            r'^R[aznqtpv]\d+(?:\.\d+)?$',  # 各种表面粗糙度
+        ]
+        for pattern in roughness_patterns:
+            if re.match(pattern, clean_text, re.IGNORECASE):
+                return 'surface_roughness'
         
-        # 表面处理
-        surface_keywords = ['镀锌', '发黑', '阳极', '喷涂', 'zinc', 'black', 'anodize', 'coating']
-        if any(keyword.lower() in text.lower() for keyword in surface_keywords):
-            return 'surface_treatment'
+        # 6. 公差等级
+        tolerance_patterns = [
+            r'^[ABCDEFGH]\d+$',            # A1, B2, H7等
+            r'^[a-h]\d+$',                 # a1, b2, h7等
+            r'^IT\d+$',                    # IT7, IT8等
+        ]
+        for pattern in tolerance_patterns:
+            if re.match(pattern, clean_text):
+                return 'tolerance'
         
-        # 默认为标注文本
+        # 7. 纯数值
+        number_patterns = [
+            r'^\d+(?:\.\d+)?$',            # 20, 30.5
+            r'^\d+(?:\.\d+)?mm$',          # 20mm, 30.5mm
+        ]
+        for pattern in number_patterns:
+            if re.match(pattern, clean_text):
+                return 'number'
+        
+        # 8. 材料标记
+        material_keywords = [
+            # 中文材料
+            '钢', '铁', '铜', '铝', '不锈钢', '碳钢', '合金钢', '铸铁', '铸钢',
+            '黄铜', '青铜', '紫铜', '锌合金', '镁合金', '钛合金',
+            # 英文材料
+            'steel', 'iron', 'copper', 'aluminum', 'aluminium', 'brass', 'bronze',
+            'stainless', 'carbon', 'alloy', 'cast', 'zinc', 'magnesium', 'titanium',
+            # 材料牌号
+            'Q235', 'Q345', '45#', '20#', '16Mn', '304', '316', '201',
+        ]
+        for material in material_keywords:
+            if material.lower() in clean_text.lower():
+                return 'material'
+        
+        # 9. 表面处理
+        surface_keywords = [
+            # 中文表面处理
+            '镀锌', '发黑', '阳极氧化', '喷涂', '电镀', '热处理', '淬火', '回火',
+            '渗碳', '氮化', '磷化', '钝化', '抛光', '喷砂', '电泳', '粉末喷涂',
+            # 英文表面处理
+            'zinc', 'black', 'anodize', 'coating', 'plating', 'treatment',
+            'hardening', 'tempering', 'carburizing', 'nitriding', 'phosphating',
+            'passivation', 'polishing', 'sandblasting', 'powder', 'painting',
+        ]
+        for surface in surface_keywords:
+            if surface.lower() in clean_text.lower():
+                return 'surface_treatment'
+        
+        # 10. 几何特征
+        geometry_keywords = [
+            # 中文几何特征
+            '孔', '槽', '台', '面', '边', '角', '圆', '方', '六角', '内六角',
+            '外六角', '花键', '键槽', '螺纹', '锥度', '倒角', '圆角', '沉头',
+            # 英文几何特征
+            'hole', 'slot', 'face', 'edge', 'corner', 'round', 'square', 'hex',
+            'hexagon', 'spline', 'keyway', 'thread', 'taper', 'chamfer', 'fillet',
+        ]
+        for geometry in geometry_keywords:
+            if geometry.lower() in clean_text.lower():
+                return 'geometry'
+        
+        # 11. 位置标记
+        position_keywords = [
+            '左', '右', '上', '下', '前', '后', '内', '外', '中心', '中央',
+            'left', 'right', 'top', 'bottom', 'front', 'rear', 'inner', 'outer', 'center',
+            'A', 'B', 'C', 'D', 'E', 'F',  # 常见的位置标记
+        ]
+        if len(clean_text) <= 3 and any(pos in clean_text for pos in position_keywords):
+            return 'position'
+        
+        # 12. 标题和说明
+        title_keywords = [
+            '图', '视图', '剖面', '断面', '详图', '局部', '放大', '比例',
+            'view', 'section', 'detail', 'scale', 'fig', 'figure',
+            '标题', '说明', '备注', '注意', '要求',
+            'title', 'note', 'remark', 'attention', 'requirement',
+        ]
+        for title in title_keywords:
+            if title.lower() in clean_text.lower():
+                return 'title'
+        
+        # 13. 检查是否为单个字符（可能是标记）
+        if len(clean_text) == 1:
+            if clean_text.isalpha():
+                return 'label'
+            elif clean_text.isdigit():
+                return 'number'
+            else:
+                return 'symbol'
+        
+        # 14. 检查是否包含单位
+        unit_patterns = [
+            r'\d+(?:\.\d+)?\s*mm',  # 数字+mm
+            r'\d+(?:\.\d+)?\s*cm',  # 数字+cm
+            r'\d+(?:\.\d+)?\s*m',   # 数字+m
+            r'\d+(?:\.\d+)?\s*°',   # 数字+度
+        ]
+        for pattern in unit_patterns:
+            if re.search(pattern, clean_text, re.IGNORECASE):
+                return 'measurement'
+        
+        # 默认分类
         return 'annotation' 
