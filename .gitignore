@@ -1,3 +1,6 @@
 __pycache__/
 build/
 dist/
+core/__pycache__/
+utils/__pycache__/
+ui/__pycache__/

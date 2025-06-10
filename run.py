@@ -42,9 +42,9 @@ def main():
         print("pip install -r requirements.txt")
         print("\n继续启动应用...")
     
-    # 导入主程序
+    # 导入主程序 - 使用新的模块结构
     try:
-        from intelliannotate import main as run_app
+        from main import main as run_app
         print("🚀 启动应用程序...")
         run_app()
     except Exception as e:
