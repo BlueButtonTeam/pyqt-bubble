@@ -51,6 +51,11 @@ class MainWindow(QMainWindow):
         self.ocr_results = []  # OCR识别结果
         self.thread_pool = QThreadPool()  # 线程池
         self.current_annotation = None  # 当前选中的标注
+        
+        # 屏蔽区域管理
+        self.masked_regions = []  # 存储屏蔽区域列表
+        self.is_selecting_mask = False  # 是否处于屏蔽区域选择模式
+        
         self.setup_ui()
         self.setup_menu_bar()
         self.setup_toolbar()
@@ -301,21 +306,21 @@ class MainWindow(QMainWindow):
         if not HAS_OCR_SUPPORT:
             self.ocr_button.setEnabled(False)
             self.ocr_button.setToolTip("请安装完整依赖包以启用OCR功能")
-        self.ocr_button.setStyleSheet("""
-            QPushButton {
-                background-color: #0066cc;
+        self.ocr_button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {UI_COLORS["primary"]};
                 color: white;
                 font-weight: bold;
                 border: none;
                 min-height: 25px;
-            }
-            QPushButton:hover {
-                background-color: #0052a3;
-            }
-            QPushButton:disabled {
+            }}
+            QPushButton:hover {{
+                background-color: {UI_COLORS["secondary"]};
+            }}
+            QPushButton:disabled {{
                 background-color: #cccccc;
                 color: #666666;
-            }
+            }}
         """)
         row3_layout.addWidget(self.ocr_button)
         
@@ -328,6 +333,45 @@ class MainWindow(QMainWindow):
         row3_layout.addWidget(self.clear_ocr_btn)
         
         ocr_layout.addLayout(row3_layout)
+        
+        # 第四行：屏蔽区域管理
+        mask_layout = QHBoxLayout()
+        
+        self.mask_select_btn = QPushButton("🚫 选择屏蔽区域")
+        self.mask_select_btn.setCheckable(True)
+        self.mask_select_btn.setMaximumWidth(120)
+        self.mask_select_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {UI_COLORS["secondary"]};
+                color: white;
+                border: none;
+                min-height: 25px;
+            }}
+            QPushButton:hover {{
+                background-color: #7a89c0;
+            }}
+            QPushButton:checked {{
+                background-color: #ff6b6b;
+                color: white;
+            }}
+        """)
+        mask_layout.addWidget(self.mask_select_btn)
+        
+        self.clear_masks_btn = QPushButton("清除屏蔽")
+        self.clear_masks_btn.setMaximumWidth(80)
+        mask_layout.addWidget(self.clear_masks_btn)
+        
+        self.mask_count_label = QLabel("屏蔽区域: 0个")
+        self.mask_count_label.setStyleSheet("""
+            QLabel {
+                color: #6c757d;
+                font-size: 11px;
+            }
+        """)
+        mask_layout.addWidget(self.mask_count_label)
+        
+        mask_layout.addStretch()
+        ocr_layout.addLayout(mask_layout)
         
         # 进度条和统计信息
         self.progress_bar = QProgressBar()
@@ -357,15 +401,6 @@ class MainWindow(QMainWindow):
         ocr_layout.addLayout(filter_layout)
         
         parent_layout.addWidget(ocr_widget)
-        
-        # 连接信号
-        self.confidence_slider.valueChanged.connect(
-            lambda v: self.confidence_label.setText(f"{v/100:.2f}")
-        )
-        self.ocr_button.clicked.connect(self.start_ocr_recognition)
-        self.create_all_btn.clicked.connect(self.create_annotations_from_ocr)
-        self.clear_ocr_btn.clicked.connect(self.clear_ocr_results)
-        self.filter_combo.currentTextChanged.connect(self.filter_ocr_results)
 
     def setup_menu_bar(self):
         """设置菜单栏"""
@@ -422,8 +457,16 @@ class MainWindow(QMainWindow):
         # 区域选择标注按钮
         self.area_select_action = QAction("区域标注", self)
         self.area_select_action.setCheckable(True)
+        self.area_select_action.setStatusTip("选择区域创建标注")
         self.area_select_action.toggled.connect(self.toggle_area_selection)
         toolbar.addAction(self.area_select_action)
+        
+        # 屏蔽区域选择
+        self.mask_select_action = QAction("🚫 屏蔽区域", self)
+        self.mask_select_action.setCheckable(True)
+        self.mask_select_action.setStatusTip("选择不需要OCR识别的区域")
+        self.mask_select_action.toggled.connect(self.toggle_mask_selection)
+        toolbar.addAction(self.mask_select_action)
         
         toolbar.addSeparator()
         
@@ -450,9 +493,22 @@ class MainWindow(QMainWindow):
         # 属性编辑器文本改变
         self.property_editor.text_changed.connect(self.update_annotation_text)
         
-        # 图形视图区域选择
-        self.graphics_view.area_selected.connect(self.create_annotation_in_area)
-    
+        # 图形视图区域选择 - 只连接到统一的处理函数
+        self.graphics_view.area_selected.connect(self.handle_area_selection)
+        
+        # OCR相关连接
+        self.confidence_slider.valueChanged.connect(
+            lambda v: self.confidence_label.setText(f"{v/100:.2f}")
+        )
+        self.ocr_button.clicked.connect(self.start_ocr_recognition)
+        self.create_all_btn.clicked.connect(self.create_annotations_from_ocr)
+        self.clear_ocr_btn.clicked.connect(self.clear_ocr_results)
+        self.filter_combo.currentTextChanged.connect(self.filter_ocr_results)
+        
+        # 屏蔽区域相关连接
+        self.mask_select_btn.toggled.connect(self.toggle_mask_selection)
+        self.clear_masks_btn.clicked.connect(self.clear_masked_regions)
+
     def open_file(self):
         """打开文件对话框"""
         file_dialog = QFileDialog(self)
@@ -475,6 +531,7 @@ class MainWindow(QMainWindow):
         self.graphics_scene.clear()
         self.clear_annotations()
         self.clear_ocr_results()
+        self.clear_masked_regions()  # 清除屏蔽区域
         
         try:
             if extension in SUPPORTED_IMAGE_FORMATS:
@@ -554,8 +611,18 @@ class MainWindow(QMainWindow):
         # 获取语言设置
         selected_languages = DEFAULT_OCR_LANGUAGES[self.language_combo.currentText()]
         
-        # 创建OCR工作线程
-        self.ocr_worker = OCRWorker(self.current_file_path, selected_languages)
+        # 将QRectF屏蔽区域转换为简单的坐标格式
+        masked_regions_data = []
+        for region in self.masked_regions:
+            masked_regions_data.append({
+                'x': region.x(),
+                'y': region.y(),
+                'width': region.width(),
+                'height': region.height()
+            })
+        
+        # 创建OCR工作线程，传入屏蔽区域信息
+        self.ocr_worker = OCRWorker(self.current_file_path, selected_languages, masked_regions_data)
         self.ocr_worker.signals.finished.connect(self.on_ocr_finished)
         self.ocr_worker.signals.progress.connect(self.on_ocr_progress)
         self.ocr_worker.signals.error.connect(self.on_ocr_error)
@@ -565,6 +632,12 @@ class MainWindow(QMainWindow):
         self.ocr_button.setText("🔄 识别中...")
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
+        
+        # 显示屏蔽区域信息
+        if self.masked_regions:
+            self.status_bar.showMessage(f"正在进行OCR识别（已屏蔽 {len(self.masked_regions)} 个区域）...")
+        else:
+            self.status_bar.showMessage("正在进行OCR识别...")
         
         # 启动线程
         self.thread_pool.start(self.ocr_worker)
@@ -809,6 +882,10 @@ class MainWindow(QMainWindow):
     
     def create_annotation_in_area(self, rect: QRectF):
         """在选定区域创建标注"""
+        # 如果处于屏蔽区域选择模式，不创建标注
+        if self.is_selecting_mask:
+            return
+            
         self.annotation_counter += 1
         
         # 在矩形中心创建标注
@@ -834,6 +911,7 @@ class MainWindow(QMainWindow):
         
         # 退出区域选择模式
         self.area_select_action.setChecked(False)
+        self.toggle_area_selection(False)
     
     def delete_annotation(self, annotation: BubbleAnnotationItem):
         """删除标注"""
@@ -881,4 +959,145 @@ class MainWindow(QMainWindow):
         
         self.annotations.clear()
         self.annotation_list.clear_annotations()
-        self.property_editor.set_annotation(None) 
+        self.property_editor.set_annotation(None)
+
+    def toggle_mask_selection(self, checked: bool):
+        """切换屏蔽区域选择模式"""
+        self.is_selecting_mask = checked
+        self.graphics_view.set_selection_mode(checked)
+        
+        # 同步工具栏和OCR面板按钮状态（阻止信号避免重复触发）
+        if hasattr(self, 'mask_select_action'):
+            self.mask_select_action.blockSignals(True)
+            self.mask_select_action.setChecked(checked)
+            self.mask_select_action.blockSignals(False)
+        
+        if hasattr(self, 'mask_select_btn'):
+            self.mask_select_btn.blockSignals(True)
+            self.mask_select_btn.setChecked(checked)
+            self.mask_select_btn.blockSignals(False)
+        
+        # 互斥：如果选择屏蔽区域，取消区域标注选择
+        if checked and hasattr(self, 'area_select_action'):
+            self.area_select_action.blockSignals(True)
+            self.area_select_action.setChecked(False)
+            self.area_select_action.blockSignals(False)
+        
+        if checked:
+            if hasattr(self, 'mask_select_btn'):
+                self.mask_select_btn.setText("🚫 选择中...")
+            self.status_bar.showMessage("屏蔽区域选择模式：拖拽鼠标选择要屏蔽的区域", 0)
+        else:
+            if hasattr(self, 'mask_select_btn'):
+                self.mask_select_btn.setText("🚫 选择屏蔽区域")
+            self.status_bar.showMessage("已退出屏蔽区域选择模式", 3000)
+    
+    def handle_area_selection(self, rect: QRectF):
+        """处理区域选择"""
+        if self.is_selecting_mask:
+            # 屏蔽区域选择模式
+            self.add_masked_region(rect)
+        else:
+            # 标注创建模式
+            self.create_annotation_in_area(rect)
+    
+    def add_masked_region(self, rect: QRectF):
+        """添加屏蔽区域"""
+        # 添加到屏蔽区域列表
+        self.masked_regions.append(rect)
+        
+        # 在场景中显示屏蔽区域
+        self.display_masked_region(rect, len(self.masked_regions) - 1)
+        
+        # 更新计数
+        self.update_mask_count()
+        
+        # 状态提示
+        self.status_bar.showMessage(f"已添加屏蔽区域 {len(self.masked_regions)}", 2000)
+    
+    def display_masked_region(self, rect: QRectF, index: int):
+        """在场景中显示屏蔽区域"""
+        from PySide6.QtWidgets import QGraphicsRectItem
+        from PySide6.QtCore import Qt
+        
+        # 创建矩形项
+        mask_item = QGraphicsRectItem(rect)
+        
+        # 设置样式 - 半透明红色
+        mask_color = QColor(255, 0, 0, 80)  # 半透明红色
+        border_color = QColor(255, 0, 0, 200)  # 不透明红色边框
+        
+        mask_item.setPen(QPen(border_color, 2, Qt.DashLine))
+        mask_item.setBrush(QBrush(mask_color))
+        
+        # 标记为屏蔽区域项
+        mask_item.mask_region_index = index
+        mask_item.setZValue(100)  # 确保在最上层显示
+        
+        # 添加到场景
+        self.graphics_scene.addItem(mask_item)
+    
+    def clear_masked_regions(self):
+        """清除所有屏蔽区域"""
+        # 清除数据
+        self.masked_regions.clear()
+        
+        # 清除场景中的显示
+        items_to_remove = []
+        for item in self.graphics_scene.items():
+            if hasattr(item, 'mask_region_index'):
+                items_to_remove.append(item)
+        
+        for item in items_to_remove:
+            self.graphics_scene.removeItem(item)
+        
+        # 更新计数
+        self.update_mask_count()
+        
+        # 状态提示
+        self.status_bar.showMessage("已清除所有屏蔽区域", 2000)
+    
+    def update_mask_count(self):
+        """更新屏蔽区域计数显示"""
+        count = len(self.masked_regions)
+        self.mask_count_label.setText(f"屏蔽区域: {count}个")
+    
+    def is_point_in_masked_region(self, x: float, y: float) -> bool:
+        """检查点是否在屏蔽区域内"""
+        point = QPointF(x, y)
+        for region in self.masked_regions:
+            if region.contains(point):
+                return True
+        return False
+    
+    def is_bbox_in_masked_region(self, bbox) -> bool:
+        """检查边界框是否与屏蔽区域重叠"""
+        if not self.masked_regions:
+            return False
+        
+        # 将bbox转换为QRectF
+        if hasattr(bbox, '__len__') and len(bbox) >= 4:
+            # bbox是坐标点列表
+            if HAS_OCR_SUPPORT:
+                import numpy as np
+                bbox_array = np.array(bbox)
+                x_min, y_min = np.min(bbox_array, axis=0)
+                x_max, y_max = np.max(bbox_array, axis=0)
+            else:
+                # 简单处理
+                x_coords = [p[0] for p in bbox]
+                y_coords = [p[1] for p in bbox]
+                x_min, x_max = min(x_coords), max(x_coords)
+                y_min, y_max = min(y_coords), max(y_coords)
+            
+            bbox_rect = QRectF(x_min, y_min, x_max - x_min, y_max - y_min)
+        else:
+            # bbox已经是矩形
+            bbox_rect = bbox
+        
+        # 检查是否与任何屏蔽区域重叠
+        for region in self.masked_regions:
+            if region.intersects(bbox_rect):
+                return True
+        
+        return False 

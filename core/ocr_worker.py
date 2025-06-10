@@ -26,10 +26,11 @@ class OCRWorkerSignals(QObject):
 class OCRWorker(QRunnable):
     """OCR识别工作线程 - 增强版"""
     
-    def __init__(self, image_path: str, languages: list = ['ch_sim', 'en']):
+    def __init__(self, image_path: str, languages: list = ['ch_sim', 'en'], masked_regions: list = None):
         super().__init__()
         self.image_path = image_path
         self.languages = languages
+        self.masked_regions = masked_regions or []  # 屏蔽区域列表
         self.signals = OCRWorkerSignals()
         self._reader = None
         
@@ -60,22 +61,33 @@ class OCRWorker(QRunnable):
             
             self.signals.progress.emit(15)
             
-            # 读取图像（重要：使用与显示相同的方法和参数）
-            print(f"📖 正在读取图像: {self.image_path}")
+            # 读取并处理图像
+            print(f"📖 正在处理文件: {self.image_path}")
             
-            # 重要修复：直接使用图像路径，让EasyOCR自己处理
-            # 这样可以确保OCR处理的图像与界面显示的图像坐标系统一致
+            # 获取图像数据
+            if self.image_path.lower().endswith('.pdf'):
+                # PDF文件：先转换为图像
+                image = self._extract_image_from_pdf_with_same_scale()
+                if image is None:
+                    raise Exception("无法从PDF提取图像")
+                print(f"📄 PDF转换为图像成功，尺寸: {image.shape}")
+            else:
+                # 图像文件：直接读取
+                image = cv2.imread(self.image_path)
+                if image is None:
+                    raise Exception(f"无法读取图像文件: {self.image_path}")
+                print(f"🖼️ 图像读取成功，尺寸: {image.shape}")
             
             self.signals.progress.emit(25)
             
             print("🔍 开始OCR识别...")
             
-            # 直接对图像文件进行OCR识别，不进行额外的图像预处理
-            # 这样可以确保坐标系统的一致性
+            # 主识别策略：使用原始图像
+            all_results = []
             try:
-                # 使用EasyOCR直接读取文件，让它自己处理所有预处理
+                print("  🎯 使用主识别策略...")
                 results = self._reader.readtext(
-                    self.image_path,
+                    image,
                     detail=1,
                     width_ths=0.7,      # 文本宽度阈值
                     height_ths=0.7,     # 文本高度阈值
@@ -91,7 +103,6 @@ class OCRWorker(QRunnable):
                 print(f"  📝 主识别方法识别到 {len(results)} 个文本")
                 
                 # 为结果添加方法标识
-                all_results = []
                 for result in results:
                     result_list = list(result)
                     result_list.append("primary_method")
@@ -99,70 +110,51 @@ class OCRWorker(QRunnable):
                     
             except Exception as e:
                 print(f"  ⚠️ 主识别方法失败: {e}")
-                all_results = []
             
             self.signals.progress.emit(75)
             
-            # 如果主方法失败或结果太少，尝试备用方法
+            # 如果主方法结果太少，尝试备用方法
             if len(all_results) < 5:
                 print("🔄 结果较少，尝试备用识别策略...")
                 try:
-                    # 只有在主方法失败时才进行图像预处理
-                    if self.image_path.lower().endswith('.pdf'):
-                        # 对于PDF，需要先提取图像
-                        image = self._extract_image_from_pdf_with_same_scale()
-                    else:
-                        image = cv2.imread(self.image_path)
+                    # 简单的图像增强
+                    processed_images = self._simple_preprocessing(image)
                     
-                    if image is not None:
-                        # 简单的图像增强
-                        processed_images = self._simple_preprocessing(image)
-                        
-                        for i, processed_img in enumerate(processed_images[:2]):  # 只尝试前2种方法
-                            try:
-                                backup_results = self._reader.readtext(
-                                    processed_img,
-                                    detail=1,
-                                    width_ths=0.7,
-                                    height_ths=0.7,
-                                    paragraph=False,
-                                    min_size=8,
-                                    text_threshold=0.5,  # 稍微降低阈值
-                                    low_text=0.3,
-                                    link_threshold=0.3,
-                                    canvas_size=2560,
-                                    mag_ratio=1.8
-                                )
-                                
-                                for result in backup_results:
-                                    result_list = list(result)
-                                    result_list.append(f"backup_method_{i}")
-                                    all_results.append(result_list)
-                                
-                                print(f"  📝 备用方法{i+1}识别到 {len(backup_results)} 个文本")
-                                
-                            except Exception as e:
-                                print(f"  ⚠️ 备用方法{i+1}失败: {e}")
-                                continue
+                    for i, processed_img in enumerate(processed_images[:1]):  # 只使用第一种备用方法，避免内存问题
+                        try:
+                            backup_results = self._reader.readtext(
+                                processed_img,
+                                detail=1,
+                                width_ths=0.7,
+                                height_ths=0.7,
+                                paragraph=False,
+                                min_size=8,
+                                text_threshold=0.5,  # 稍微降低阈值
+                                low_text=0.3,
+                                link_threshold=0.3,
+                                canvas_size=1280,    # 减小画布大小避免内存问题
+                                mag_ratio=1.5        # 减小放大比例
+                            )
+                            
+                            for result in backup_results:
+                                result_list = list(result)
+                                result_list.append(f"backup_method_{i}")
+                                all_results.append(result_list)
+                            
+                            print(f"  📝 备用方法{i+1}识别到 {len(backup_results)} 个文本")
+                            break  # 成功后退出循环，避免过度处理
+                            
+                        except Exception as e:
+                            print(f"  ⚠️ 备用方法{i+1}失败: {e}")
+                            continue
                         
                 except Exception as e:
                     print(f"  ⚠️ 备用识别策略失败: {e}")
             
-            # 处理识别结果（如果有图像的话用于获取尺寸信息）
+            # 处理识别结果
             if all_results:
-                try:
-                    # 获取图像尺寸用于处理
-                    if self.image_path.lower().endswith('.pdf'):
-                        temp_image = self._extract_image_from_pdf_with_same_scale()
-                        image_shape = temp_image.shape if temp_image is not None else (1000, 1000, 3)
-                    else:
-                        temp_image = cv2.imread(self.image_path)
-                        image_shape = temp_image.shape if temp_image is not None else (1000, 1000, 3)
-                except:
-                    image_shape = (1000, 1000, 3)  # 默认尺寸
-                
                 print("🔧 正在处理识别结果...")
-                processed_results = self._process_ocr_results(all_results, image_shape)
+                processed_results = self._process_ocr_results(all_results, image.shape)
                 
                 self.signals.progress.emit(90)
                 
@@ -205,31 +197,35 @@ class OCRWorker(QRunnable):
             return None
     
     def _simple_preprocessing(self, image):
-        """简单的图像预处理 - 只使用最有效的几种方法"""
+        """简单的图像预处理 - 内存优化版"""
         # 转换为灰度图
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
             gray = image.copy()
         
+        # 只使用最有效的一种预处理方法，减少内存占用
         processed_images = []
         
-        # 方法1: 基础CLAHE + 自适应阈值
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        enhanced = clahe.apply(gray)
-        denoised = cv2.bilateralFilter(enhanced, 9, 75, 75)
-        adaptive_thresh = cv2.adaptiveThreshold(
-            denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-            cv2.THRESH_BINARY, 11, 2
-        )
-        processed_images.append(adaptive_thresh)
-        
-        # 方法2: 强化对比度 + Otsu阈值
-        clahe_strong = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8,8))
-        enhanced_strong = clahe_strong.apply(gray)
-        blurred = cv2.GaussianBlur(enhanced_strong, (3, 3), 0)
-        _, otsu_thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        processed_images.append(otsu_thresh)
+        try:
+            # 方法：基础CLAHE + 自适应阈值（经验证最有效且内存友好）
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            enhanced = clahe.apply(gray)
+            
+            # 使用轻量级的双边滤波
+            denoised = cv2.bilateralFilter(enhanced, 5, 50, 50)  # 减小参数降低内存使用
+            
+            # 自适应阈值
+            adaptive_thresh = cv2.adaptiveThreshold(
+                denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY, 11, 2
+            )
+            processed_images.append(adaptive_thresh)
+            
+        except Exception as e:
+            print(f"  ⚠️ 图像预处理失败: {e}")
+            # 如果预处理失败，返回原始灰度图
+            processed_images.append(gray)
         
         return processed_images
     
@@ -237,6 +233,10 @@ class OCRWorker(QRunnable):
         """处理OCR识别结果 - 智能合并和去重"""
         processed_results = []
         height, width = image_shape[:2]
+        
+        # 统计屏蔽过滤信息
+        total_results = len(results)
+        masked_count = 0
         
         # 第一轮：基础处理和筛选
         initial_results = []
@@ -248,6 +248,18 @@ class OCRWorker(QRunnable):
             else:
                 continue
             
+            # 计算边界框信息
+            bbox_array = np.array(bbox)
+            center_x = int(np.mean(bbox_array[:, 0]))
+            center_y = int(np.mean(bbox_array[:, 1]))
+            bbox_width = int(np.max(bbox_array[:, 0]) - np.min(bbox_array[:, 0]))
+            bbox_height = int(np.max(bbox_array[:, 1]) - np.min(bbox_array[:, 1]))
+            
+            # 屏蔽区域过滤 - 检查边界框是否在屏蔽区域内
+            if self.masked_regions and self._is_bbox_in_masked_region(bbox):
+                masked_count += 1
+                continue  # 跳过屏蔽区域内的识别结果
+            
             # 动态置信度阈值
             min_confidence = self._get_dynamic_confidence_threshold(text, bbox)
             if confidence < min_confidence:
@@ -257,13 +269,6 @@ class OCRWorker(QRunnable):
             clean_text = self._clean_text(text)
             if not clean_text or len(clean_text.strip()) < 1:
                 continue
-            
-            # 计算边界框信息
-            bbox_array = np.array(bbox)
-            center_x = int(np.mean(bbox_array[:, 0]))
-            center_y = int(np.mean(bbox_array[:, 1]))
-            bbox_width = int(np.max(bbox_array[:, 0]) - np.min(bbox_array[:, 0]))
-            bbox_height = int(np.max(bbox_array[:, 1]) - np.min(bbox_array[:, 1]))
             
             # 过滤太小的检测结果（可能是噪声）
             if bbox_width < 8 or bbox_height < 6:
@@ -284,6 +289,10 @@ class OCRWorker(QRunnable):
                 'original_text': text,
                 'method_id': method_id
             })
+        
+        # 打印屏蔽统计信息
+        if self.masked_regions:
+            print(f"🚫 屏蔽区域过滤: {masked_count}/{total_results} 个识别结果被屏蔽")
         
         # 第二轮：去重和合并
         processed_results = self._merge_duplicate_detections(initial_results)
@@ -320,47 +329,122 @@ class OCRWorker(QRunnable):
         return base_threshold
     
     def _merge_duplicate_detections(self, results):
-        """智能合并重复检测的文本"""
+        """智能合并重复检测的文本 - 增强版去重"""
         if not results:
             return results
         
+        print(f"🔄 开始去重处理，原始结果数量: {len(results)}")
+        
+        # 第一步：基于位置的粗略去重
+        position_grouped = {}
+        for result in results:
+            # 使用网格化的位置作为键，减少微小偏移的影响
+            grid_x = round(result['center_x'] / 20) * 20  # 20像素网格
+            grid_y = round(result['center_y'] / 20) * 20  # 20像素网格
+            grid_key = (grid_x, grid_y)
+            
+            if grid_key not in position_grouped:
+                position_grouped[grid_key] = []
+            position_grouped[grid_key].append(result)
+        
+        # 第二步：在每个网格内进行精细去重
         merged_results = []
+        for grid_key, grid_results in position_grouped.items():
+            if len(grid_results) == 1:
+                # 网格内只有一个结果，直接添加
+                merged_results.append(grid_results[0])
+            else:
+                # 网格内有多个结果，需要去重
+                grid_merged = self._merge_grid_results(grid_results)
+                merged_results.extend(grid_merged)
+        
+        print(f"✅ 去重完成，最终结果数量: {len(merged_results)}")
+        return merged_results
+    
+    def _merge_grid_results(self, grid_results):
+        """合并网格内的重复结果"""
+        if len(grid_results) <= 1:
+            return grid_results
+        
+        merged = []
         used_indices = set()
         
-        for i, result1 in enumerate(results):
+        for i, result1 in enumerate(grid_results):
             if i in used_indices:
                 continue
             
-            # 寻找重叠的检测结果
-            overlapping = [result1]
+            # 寻找与当前结果相似的其他结果
+            similar_results = [result1]
             used_indices.add(i)
             
-            for j, result2 in enumerate(results[i+1:], i+1):
+            for j, result2 in enumerate(grid_results[i+1:], i+1):
                 if j in used_indices:
                     continue
                 
-                # 计算重叠程度
+                # 检查位置相似性（更严格的距离检查）
+                distance = ((result1['center_x'] - result2['center_x']) ** 2 + 
+                           (result1['center_y'] - result2['center_y']) ** 2) ** 0.5
+                
+                # 检查文本相似性
+                text_similar = self._texts_similar(result1['text'], result2['text'])
+                
+                # 检查边界框重叠
                 overlap_ratio = self._calculate_bbox_overlap(result1['bbox'], result2['bbox'])
                 
-                # 如果重叠度高且文本相似
-                if overlap_ratio > 0.3 and self._texts_similar(result1['text'], result2['text']):
-                    overlapping.append(result2)
-                    used_indices.add(j)
-                # 位置相近且文本类型相同的也可能是同一个目标
-                elif (self._positions_close(result1, result2) and 
-                      result1['text_type'] == result2['text_type'] and
-                      self._texts_similar(result1['text'], result2['text'])):
-                    overlapping.append(result2)
+                # 更严格的合并条件
+                should_merge = False
+                
+                if distance < 15 and text_similar:
+                    # 位置很近且文本相似
+                    should_merge = True
+                elif overlap_ratio > 0.5:
+                    # 边界框大量重叠
+                    should_merge = True
+                elif distance < 25 and overlap_ratio > 0.3 and text_similar:
+                    # 中等距离但有重叠且文本相似
+                    should_merge = True
+                
+                if should_merge:
+                    similar_results.append(result2)
                     used_indices.add(j)
             
-            # 合并重叠的检测结果
-            if len(overlapping) == 1:
-                merged_results.append(overlapping[0])
+            # 合并相似的结果
+            if len(similar_results) == 1:
+                merged.append(similar_results[0])
             else:
-                merged_result = self._merge_overlapping_results(overlapping)
-                merged_results.append(merged_result)
+                merged_result = self._merge_similar_results(similar_results)
+                merged.append(merged_result)
         
-        return merged_results
+        return merged
+    
+    def _merge_similar_results(self, similar_results):
+        """合并相似的结果"""
+        # 选择置信度最高的作为基础
+        best_result = max(similar_results, key=lambda x: x['confidence'])
+        
+        # 选择最长且有意义的文本
+        best_text = best_result['text']
+        for result in similar_results:
+            if (len(result['text']) > len(best_text) and 
+                result['confidence'] > 0.3 and
+                result['confidence'] > best_result['confidence'] * 0.6):
+                best_text = result['text']
+        
+        # 使用最高的置信度
+        best_confidence = max(r['confidence'] for r in similar_results)
+        
+        # 使用平均位置（更稳定）
+        avg_x = sum(r['center_x'] for r in similar_results) / len(similar_results)
+        avg_y = sum(r['center_y'] for r in similar_results) / len(similar_results)
+        
+        # 创建合并后的结果
+        merged = best_result.copy()
+        merged['text'] = best_text
+        merged['confidence'] = best_confidence
+        merged['center_x'] = int(avg_x)
+        merged['center_y'] = int(avg_y)
+        
+        return merged
     
     def _positions_close(self, result1, result2, threshold=50):
         """判断两个检测结果的位置是否相近"""
@@ -435,24 +519,6 @@ class OCRWorker(QRunnable):
                     distances_.append(1 + min((distances[i1], distances[i1 + 1], distances_[-1])))
             distances = distances_
         return distances[-1]
-    
-    def _merge_overlapping_results(self, overlapping_results):
-        """智能合并重叠的识别结果"""
-        # 选择置信度最高的作为主结果
-        best_result = max(overlapping_results, key=lambda x: x['confidence'])
-        
-        # 如果有更长且置信度不太低的文本，优先使用
-        for result in overlapping_results:
-            if (len(result['text']) > len(best_result['text']) and 
-                result['confidence'] > 0.3 and
-                result['confidence'] > best_result['confidence'] * 0.7):
-                best_result['text'] = result['text']
-                break
-        
-        # 保留最高的置信度
-        best_result['confidence'] = max(r['confidence'] for r in overlapping_results)
-        
-        return best_result
     
     def _apply_context_optimization(self, results):
         """应用上下文优化"""
@@ -799,4 +865,41 @@ class OCRWorker(QRunnable):
                 return 'measurement'
         
         # 默认分类
-        return 'annotation' 
+        return 'annotation'
+    
+    def _is_bbox_in_masked_region(self, bbox) -> bool:
+        """检查边界框是否在屏蔽区域内"""
+        if not self.masked_regions:
+            return False
+        
+        # 计算边界框的矩形
+        bbox_array = np.array(bbox)
+        x_min, y_min = np.min(bbox_array, axis=0)
+        x_max, y_max = np.max(bbox_array, axis=0)
+        
+        # 检查中心点是否在屏蔽区域内
+        center_x = (x_min + x_max) / 2
+        center_y = (y_min + y_max) / 2
+        
+        # 处理字典格式的屏蔽区域数据
+        for region in self.masked_regions:
+            if isinstance(region, dict):
+                # 字典格式: {'x': x, 'y': y, 'width': w, 'height': h}
+                rx = region.get('x', 0)
+                ry = region.get('y', 0)
+                rw = region.get('width', 0)
+                rh = region.get('height', 0)
+                
+                if rx <= center_x <= rx + rw and ry <= center_y <= ry + rh:
+                    return True
+            elif hasattr(region, 'contains'):
+                # QRectF对象
+                if region.contains(center_x, center_y):
+                    return True
+            elif hasattr(region, '__getitem__') and len(region) >= 4:
+                # 坐标数组 [x, y, width, height]
+                rx, ry, rw, rh = region[0], region[1], region[2], region[3]
+                if rx <= center_x <= rx + rw and ry <= center_y <= ry + rh:
+                    return True
+        
+        return False 
