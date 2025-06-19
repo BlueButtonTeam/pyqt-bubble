@@ -1,175 +1,252 @@
-#!/usr/bin/env python3
-"""
-气泡标注项模块
-"""
+# core/annotation_item.py (支持调整大小版 - 真正完整)
 
-from typing import Dict
-from PySide6.QtWidgets import QGraphicsObject, QMenu
+import math
+from typing import Optional
+
+from PySide6.QtWidgets import QGraphicsObject, QMenu, QColorDialog
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF
-from PySide6.QtGui import QPainter, QPen, QBrush, QColor, QFont
-
-from utils.constants import (
-    ANNOTATION_STYLES, DEFAULT_CIRCLE_RADIUS, DEFAULT_LEADER_LENGTH
+from PySide6.QtGui import (
+    QPainter, QPen, QBrush, QColor, QPainterPath, QFont, QPolygonF, QPainterPathStroker
 )
-
 
 class BubbleAnnotationItem(QGraphicsObject):
     """
-    气泡标注图形项，包含引线和圆圈编号
+    【大小、颜色、形状多样化版】气泡标注图形项
     """
-    selected = Signal(object)  # 被选中时发射信号
-    moved = Signal(object, QPointF)  # 被移动时发射信号
-    delete_requested = Signal(object)  # 删除请求信号
-    style_change_requested = Signal(object)  # 样式改变请求信号
-    
-    def __init__(self, annotation_id: int, position: QPointF, text: str = "", style: str = "default"):
+    # --- 自定义信号 ---
+    size_change_requested = Signal(object) # 新增信号
+    shape_change_requested = Signal(object)
+    style_change_requested = Signal(object)
+    color_change_requested = Signal(object)
+    selected = Signal(object)
+    moved = Signal(object, QPointF)
+    delete_requested = Signal(object)
+
+    def __init__(self, annotation_id: int, anchor_point: QPointF, text: str = "", style: str = "default", shape: str = "circle", color: Optional[QColor] = None, size: int = 15):
         super().__init__()
         self.annotation_id = annotation_id
         self.text = text or f"标注 {annotation_id}"
-        self.circle_radius = DEFAULT_CIRCLE_RADIUS
-        self.leader_length = DEFAULT_LEADER_LENGTH
-        self.style = style  # 标注样式
-        
-        # 设置标志
-        self.setFlags(
-            QGraphicsObject.ItemIsSelectable |
-            QGraphicsObject.ItemIsMovable |
-            QGraphicsObject.ItemSendsGeometryChanges
-        )
-        
-        # 设置位置
-        self.setPos(position)
-        
-        # 选中状态
+        self.style = style
+        self.arrow_head_size = 10
+        self.shape_type = shape
+        self.custom_color = color
+
+        # --- 新增核心属性：大小 ---
+        self.radius = size # 使用传入的size作为半径
+
+        self.anchor_point = anchor_point
         self._is_highlighted = False
-        
-        # 设置接受右键菜单
+        self._cached_shape_path = QPainterPath()
+
+        self.setFlags(
+            QGraphicsObject.ItemIsSelectable | QGraphicsObject.ItemIsMovable | QGraphicsObject.ItemSendsGeometryChanges
+        )
+        self.setCacheMode(QGraphicsObject.DeviceCoordinateCache)
         self.setAcceptedMouseButtons(Qt.LeftButton | Qt.RightButton)
+
+        initial_bubble_position = anchor_point + QPointF(50, 0)
+        self.setPos(initial_bubble_position)
         
-    def get_style_colors(self) -> Dict[str, QColor]:
-        """根据样式获取颜色"""
-        style_config = ANNOTATION_STYLES.get(self.style, ANNOTATION_STYLES["default"])
+        self._update_geometry()
+
+    def get_style_colors(self):
+        if self.custom_color and self.custom_color.isValid():
+            return {
+                "normal_pen": self.custom_color, "normal_brush": QColor(self.custom_color.red(), self.custom_color.green(), self.custom_color.blue(), 100),
+                "selected_pen": self.custom_color.darker(150), "selected_brush": QColor(self.custom_color.red(), self.custom_color.green(), self.custom_color.blue(), 150)
+            }
+        styles = {
+            "default": {"normal_pen": QColor(0, 0, 255), "normal_brush": QColor(255, 255, 255, 200), "selected_pen": QColor(255, 0, 0), "selected_brush": QColor(255, 255, 0, 100)},
+            "warning": {"normal_pen": QColor(255, 165, 0), "normal_brush": QColor(255, 248, 220, 200), "selected_pen": QColor(255, 69, 0), "selected_brush": QColor(255, 218, 185, 150)},
+            "error": {"normal_pen": QColor(220, 20, 60), "normal_brush": QColor(255, 192, 203, 200), "selected_pen": QColor(178, 34, 34), "selected_brush": QColor(255, 160, 122, 150)},
+            "success": {"normal_pen": QColor(34, 139, 34), "normal_brush": QColor(240, 255, 240, 200), "selected_pen": QColor(0, 128, 0), "selected_brush": QColor(144, 238, 144, 150)}
+        }
+        return styles.get(self.style, styles["default"])
+
+    def _update_geometry(self):
+        path = QPainterPath()
+        if self.shape_type in ["circle", "solid_circle"]:
+            path.addEllipse(QPointF(0, 0), self.radius, self.radius)
+        elif self.shape_type == "pentagram":
+            path.addPolygon(self._create_star_polygon())
+        elif self.shape_type == "triangle":
+            path.addPolygon(self._create_triangle_polygon())
+        else: # 默认圆形
+            path.addEllipse(QPointF(0, 0), self.radius, self.radius)
+
+        bubble_center_local = QPointF(0, 0)
+        anchor_local = self.mapFromScene(self.anchor_point)
+        line_vector = anchor_local - bubble_center_local
+        distance = math.hypot(line_vector.x(), line_vector.y())
+
+        if distance > self.radius:
+            line_path = QPainterPath()
+            start_point = bubble_center_local + line_vector * (self.radius / distance)
+            line_path.moveTo(start_point)
+            line_path.lineTo(anchor_local)
+            
+            stroker = QPainterPathStroker()
+            stroker.setWidth(self.arrow_head_size)
+            path.addPath(stroker.createStroke(line_path))
         
-        colors = {}
-        for key, rgba in style_config.items():
-            if len(rgba) == 3:
-                colors[key] = QColor(*rgba)
-            else:
-                colors[key] = QColor(*rgba)
-        
-        return colors
-        
+        self._cached_shape_path = path
+
+    def shape(self) -> QPainterPath:
+        return self._cached_shape_path
+
     def boundingRect(self) -> QRectF:
-        """返回边界矩形"""
-        padding = 5
-        total_width = self.leader_length + self.circle_radius * 2 + padding * 2
-        total_height = self.circle_radius * 2 + padding * 2
-        return QRectF(-padding, -self.circle_radius - padding, 
-                     total_width, total_height)
-    
+        return self._cached_shape_path.controlPointRect()
+
     def paint(self, painter: QPainter, option, widget=None):
-        """绘制气泡标注"""
         painter.setRenderHint(QPainter.Antialiasing, True)
         
-        # 获取样式颜色
         colors = self.get_style_colors()
-        
-        # 设置画笔和画刷
-        if self.isSelected() or self._is_highlighted:
-            pen = QPen(colors["selected_pen"], 2)
-            brush = QBrush(colors["selected_brush"])
-        else:
-            pen = QPen(colors["normal_pen"], 1)
-            brush = QBrush(colors["normal_brush"])
-            
+        pen = QPen(colors["selected_pen"], 2) if self.isSelected() or self._is_highlighted else QPen(colors["normal_pen"], 1)
+        brush = QBrush(colors["selected_brush"]) if self.isSelected() or self._is_highlighted else QBrush(colors["normal_brush"])
         painter.setPen(pen)
-        painter.setBrush(brush)
         
-        # 绘制引线
-        leader_start = QPointF(0, 0)
-        leader_end = QPointF(self.leader_length, 0)
-        painter.drawLine(leader_start, leader_end)
-        
-        # 绘制圆圈
-        circle_center = QPointF(self.leader_length + self.circle_radius, 0)
-        painter.drawEllipse(circle_center, self.circle_radius, self.circle_radius)
-        
-        # 绘制编号文字
+        bubble_center_local = QPointF(0, 0)
+        anchor_local = self.mapFromScene(self.anchor_point)
+        line_vector = anchor_local - bubble_center_local
+        distance = math.hypot(line_vector.x(), line_vector.y())
+        if distance > self.radius:
+            start_point = bubble_center_local + line_vector * (self.radius / distance)
+            painter.drawLine(start_point, anchor_local)
+            self._draw_arrowhead(painter, start_point, anchor_local)
+
+        if self.shape_type == "solid_circle":
+            painter.setBrush(pen.color())
+        else:
+            painter.setBrush(brush)
+            
+        if self.shape_type in ["circle", "solid_circle"]:
+            painter.drawEllipse(bubble_center_local, self.radius, self.radius)
+        elif self.shape_type == "pentagram":
+            painter.drawPolygon(self._create_star_polygon())
+        elif self.shape_type == "triangle":
+            painter.drawPolygon(self._create_triangle_polygon())
+        else:
+            painter.drawEllipse(bubble_center_local, self.radius, self.radius)
+
         painter.setPen(QPen(QColor(0, 0, 0)))
-        font = QFont("Arial", 10, QFont.Bold)
+        font_size = max(int(self.radius * 0.6), 6)
+        font = QFont("Arial", font_size, QFont.Bold)
         painter.setFont(font)
-        text_rect = QRectF(circle_center.x() - self.circle_radius,
-                          circle_center.y() - self.circle_radius,
-                          self.circle_radius * 2,
-                          self.circle_radius * 2)
+        text_rect = QRectF(-self.radius, -self.radius, self.radius * 2, self.radius * 2)
         painter.drawText(text_rect, Qt.AlignCenter, str(self.annotation_id))
-    
-    def mousePressEvent(self, event):
-        """鼠标按下事件"""
-        if event.button() == Qt.LeftButton:
-            super().mousePressEvent(event)
-            self.selected.emit(self)
-        elif event.button() == Qt.RightButton:
-            self.show_context_menu(event.screenPos())
-            event.accept()
-    
-    def show_context_menu(self, global_pos):
-        """显示右键菜单"""
-        menu = QMenu()
-        
-        # 删除动作
-        delete_action = menu.addAction("删除标注")
-        delete_action.triggered.connect(lambda: self.delete_requested.emit(self))
-        
-        menu.addSeparator()
-        
-        # 样式子菜单
-        style_menu = menu.addMenu("更改样式")
-        
-        styles = [
-            ("默认", "default"),
-            ("警告", "warning"), 
-            ("错误", "error"),
-            ("成功", "success")
-        ]
-        
-        for style_name, style_key in styles:
-            style_action = style_menu.addAction(style_name)
-            if style_key != self.style:  # 当前样式不可选
-                style_action.triggered.connect(
-                    lambda checked, s=style_key: self.change_style(s)
-                )
-            else:
-                style_action.setEnabled(False)
-        
-        menu.exec(global_pos.toPoint())
-    
-    def change_style(self, new_style: str):
-        """改变标注样式"""
-        self.style = new_style
-        self.update()  # 重绘
-        self.style_change_requested.emit(self)
-    
+
+    def _draw_arrowhead(self, painter: QPainter, line_start: QPointF, line_end: QPointF):
+        angle = math.atan2(-(line_start.y() - line_end.y()), line_start.x() - line_end.x())
+        wing_angle = math.pi / 6 
+        arrow_p1 = line_end + QPointF(self.arrow_head_size * math.cos(angle - wing_angle), -self.arrow_head_size * math.sin(angle - wing_angle))
+        arrow_p2 = line_end + QPointF(self.arrow_head_size * math.cos(angle + wing_angle), -self.arrow_head_size * math.sin(angle + wing_angle))
+        painter.drawLine(line_end, arrow_p1)
+        painter.drawLine(line_end, arrow_p2)
+
+    def _create_star_polygon(self) -> QPolygonF:
+        polygon = QPolygonF()
+        for i in range(5):
+            angle_deg = -90 + i * 72; angle_rad = math.radians(angle_deg)
+            outer_point = QPointF(self.radius * math.cos(angle_rad), self.radius * math.sin(angle_rad)); polygon.append(outer_point)
+            angle_deg += 36; angle_rad = math.radians(angle_deg)
+            inner_point = QPointF(self.radius * 0.4 * math.cos(angle_rad), self.radius * 0.4 * math.sin(angle_rad)); polygon.append(inner_point)
+        return polygon
+
+    def _create_triangle_polygon(self) -> QPolygonF:
+        polygon = QPolygonF()
+        for i in range(3):
+            angle_deg = -90 + i * 120; angle_rad = math.radians(angle_deg)
+            point = QPointF(self.radius * math.cos(angle_rad), self.radius * math.sin(angle_rad)); polygon.append(point)
+        return polygon
+
     def itemChange(self, change, value):
-        """项目变化时的回调"""
-        if change == QGraphicsObject.ItemPositionChange:
+        if change == QGraphicsObject.ItemPositionChange and self.scene():
+            self.prepareGeometryChange()
+            self._update_geometry()
             self.moved.emit(self, value)
         return super().itemChange(change, value)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton: super().mousePressEvent(event); self.selected.emit(self)
+        elif event.button() == Qt.RightButton: self.show_context_menu(event.screenPos()); event.accept()
+
+    def show_context_menu(self, global_pos):
+        menu = QMenu()
+        
+        delete_action = menu.addAction("删除标注")
+        delete_action.triggered.connect(lambda: self.delete_requested.emit(self))
+        menu.addSeparator()
+
+        color_action = menu.addAction("选择颜色...")
+        color_action.triggered.connect(self._open_color_dialog)
+        
+        shape_menu = menu.addMenu("更改形状")
+        shapes = [("空心圆", "circle"), ("实心圆", "solid_circle"), ("五角星", "pentagram"), ("三角形", "triangle")]
+        for shape_name, shape_key in shapes:
+            shape_action = shape_menu.addAction(shape_name)
+            shape_action.setEnabled(shape_key != self.shape_type)
+            if shape_key != self.shape_type:
+                shape_action.triggered.connect(lambda checked, s=shape_key: self.change_shape(s))
+        
+        size_menu = menu.addMenu("调整大小")
+        sizes = [("小 (10)", 10), ("中 (15)", 15), ("大 (20)", 20), ("特大 (25)", 25)]
+        for size_name, size_val in sizes:
+            size_action = size_menu.addAction(size_name)
+            size_action.setEnabled(size_val != self.radius)
+            if size_val != self.radius:
+                size_action.triggered.connect(lambda checked, s=size_val: self.change_size(s))
+        
+        style_menu = menu.addMenu("更改样式")
+        styles = [("默认", "default"), ("警告", "warning"), ("错误", "error"), ("成功", "success")]
+        for style_name, style_key in styles:
+            style_action = style_menu.addAction(style_name)
+            style_action.setEnabled(self.style != style_key or self.custom_color is not None)
+            if self.style != style_key or self.custom_color is not None:
+                style_action.triggered.connect(lambda checked, s=style_key: self.change_style(s))
+        
+        menu.exec(global_pos.toPoint())
+
+    def _open_color_dialog(self):
+        initial_color = self.custom_color if self.custom_color and self.custom_color.isValid() else QColor("blue")
+        color = QColorDialog.getColor(initial_color, None, "选择标注颜色")
+        if color.isValid():
+            self.change_color(color)
+
+    def change_size(self, new_size: int):
+        self.radius = new_size
+        self.prepareGeometryChange()
+        self._update_geometry()
+        self.update()
+        self.size_change_requested.emit(self)
+
+    def change_color(self, new_color: QColor):
+        self.custom_color = new_color
+        self.style = 'custom'
+        self.update()
+        self.color_change_requested.emit(self)
+
+    def change_shape(self, new_shape: str):
+        self.shape_type = new_shape
+        self.prepareGeometryChange()
+        self._update_geometry()
+        self.update()
+        self.shape_change_requested.emit(self)
+
+    def change_style(self, new_style: str):
+        self.custom_color = None
+        self.style = new_style
+        self.update()
+        self.style_change_requested.emit(self)
     
     def set_highlighted(self, highlighted: bool):
-        """设置高亮状态"""
         self._is_highlighted = highlighted
         self.update()
     
     def get_data(self) -> dict:
-        """获取标注数据"""
-        return {
-            'id': self.annotation_id,
-            'text': self.text,
-            'position': self.pos(),
-            'style': self.style
-        }
+        color_hex = self.custom_color.name() if self.custom_color and self.custom_color.isValid() else None
+        return {'id': self.annotation_id, 'text': self.text, 'bubble_position': self.pos(), 
+                'anchor_point': self.anchor_point, 'style': self.style, 
+                'shape': self.shape_type, 'color': color_hex, 'size': self.radius}
     
     def set_text(self, text: str):
-        """设置标注文本"""
-        self.text = text 
+        self.text = text
