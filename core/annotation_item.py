@@ -1,4 +1,4 @@
-# core/annotation_item.py (支持调整大小版 - 真正完整)
+# core/annotation_item.py
 
 import math
 from typing import Optional
@@ -11,18 +11,25 @@ from PySide6.QtGui import (
 
 class BubbleAnnotationItem(QGraphicsObject):
     """
-    【大小、颜色、形状多样化版】气泡标注图形项
+    【功能增强版】气泡标注图形项
+    - 新增审核状态属性
     """
-    # --- 自定义信号 ---
-    size_change_requested = Signal(object) # 新增信号
+    # --- 已有信号 ---
+    size_change_requested = Signal(object)
     shape_change_requested = Signal(object)
     style_change_requested = Signal(object)
     color_change_requested = Signal(object)
     selected = Signal(object)
     moved = Signal(object, QPointF)
     delete_requested = Signal(object)
+    data_updated = Signal(object)
 
-    def __init__(self, annotation_id: int, anchor_point: QPointF, text: str = "", style: str = "default", shape: str = "circle", color: Optional[QColor] = None, size: int = 15):
+    def __init__(self, annotation_id: int, anchor_point: QPointF, text: str = "", style: str = "default", 
+                 shape: str = "circle", color: Optional[QColor] = None, size: int = 15,
+                 dimension: str = "", dimension_type: str = "", 
+                 upper_tolerance: str = "", lower_tolerance: str = "",
+                 # --- 新增属性 ---
+                 is_audited: bool = False):
         super().__init__()
         self.annotation_id = annotation_id
         self.text = text or f"标注 {annotation_id}"
@@ -30,10 +37,16 @@ class BubbleAnnotationItem(QGraphicsObject):
         self.arrow_head_size = 10
         self.shape_type = shape
         self.custom_color = color
-
-        # --- 新增核心属性：大小 ---
-        self.radius = size # 使用传入的size作为半径
-
+        self.radius = size
+        
+        self.dimension = dimension
+        self.dimension_type = dimension_type
+        self.upper_tolerance = upper_tolerance
+        self.lower_tolerance = lower_tolerance
+        
+        # --- 初始化新增属性 ---
+        self.is_audited = is_audited
+        
         self.anchor_point = anchor_point
         self._is_highlighted = False
         self._cached_shape_path = QPainterPath()
@@ -49,6 +62,38 @@ class BubbleAnnotationItem(QGraphicsObject):
         
         self._update_geometry()
 
+    # --- Setter 方法 ---
+    def set_dimension(self, value: str):
+        if self.dimension != value:
+            self.dimension = value
+            self.data_updated.emit(self)
+
+    def set_dimension_type(self, value: str):
+        if self.dimension_type != value:
+            self.dimension_type = value
+            self.data_updated.emit(self)
+
+    def set_upper_tolerance(self, value: str):
+        if self.upper_tolerance != value:
+            self.upper_tolerance = value
+            self.data_updated.emit(self)
+
+    def set_lower_tolerance(self, value: str):
+        if self.lower_tolerance != value:
+            self.lower_tolerance = value
+            self.data_updated.emit(self)
+
+    def set_text(self, text: str):
+        if self.text != text:
+            self.text = text
+            self.data_updated.emit(self)
+            
+    def set_audited(self, audited: bool):
+        """【新增】设置审核状态的方法"""
+        if self.is_audited != audited:
+            self.is_audited = audited
+            self.data_updated.emit(self) # 发射信号，通知UI更新
+    
     def get_style_colors(self):
         if self.custom_color and self.custom_color.isValid():
             return {
@@ -244,9 +289,11 @@ class BubbleAnnotationItem(QGraphicsObject):
     
     def get_data(self) -> dict:
         color_hex = self.custom_color.name() if self.custom_color and self.custom_color.isValid() else None
-        return {'id': self.annotation_id, 'text': self.text, 'bubble_position': self.pos(), 
-                'anchor_point': self.anchor_point, 'style': self.style, 
-                'shape': self.shape_type, 'color': color_hex, 'size': self.radius}
-    
-    def set_text(self, text: str):
-        self.text = text
+        return {
+            'id': self.annotation_id, 'text': self.text, 'bubble_position': self.pos(), 
+            'anchor_point': self.anchor_point, 'style': self.style, 
+            'shape': self.shape_type, 'color': color_hex, 'size': self.radius,
+            'dimension': self.dimension, 'dimension_type': self.dimension_type,
+            'upper_tolerance': self.upper_tolerance, 'lower_tolerance': self.lower_tolerance,
+            'is_audited': self.is_audited # <-- 新增
+        }
