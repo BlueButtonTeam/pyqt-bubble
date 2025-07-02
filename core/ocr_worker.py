@@ -1,45 +1,286 @@
 #!/usr/bin/env python3
 """
-OCR识别工作线程模块 - 增强版
+PaddleOCR识别工作线程模块 - 使用您训练的专用模型
 针对机械图纸进行深度优化的OCR识别系统
 """
 
+import sys
+import os
+import cv2
+import numpy as np
+import logging
 import re
 from PySide6.QtCore import QObject, QRunnable, Signal
-from utils.dependencies import HAS_OCR_SUPPORT
+from typing import List, Dict, Tuple, Optional, Any
 
-if HAS_OCR_SUPPORT:
-    import cv2
+# 添加PaddleOCR路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+paddleocr_root = os.path.dirname(parent_dir)  # PaddleOCR主目录
+sys.path.insert(0, paddleocr_root)  # 添加到路径开头
+sys.path.insert(0, parent_dir)
+
+# 导入PaddleOCR相关模块
+try:
+    # 导入PaddleOCR核心模块
+    from ppocr.data import create_operators, transform
+    from ppocr.modeling.architectures import build_model
+    from ppocr.postprocess import build_post_process
+    from ppocr.utils.save_load import load_model
+    from ppocr.utils.utility import get_image_file_list
+    import paddle
+    import yaml
+    import copy
     import numpy as np
-    import torch
-    import easyocr
-    import fitz
+    import cv2
+    PADDLE_AVAILABLE = True
+    print("✅ PaddleOCR模块导入成功")
+except ImportError as e:
+    logging.warning(f"PaddleOCR not available: {e}")
+    PADDLE_AVAILABLE = False
+    print(f"❌ PaddleOCR模块导入失败: {e}")
 
 
-class OCRWorkerSignals(QObject):
-    """OCR工作线程信号"""
+class PaddleOCRWorkerSignals(QObject):
+    """PaddleOCR工作线程信号"""
     finished = Signal(list)  # OCR完成信号，传递识别结果列表
     progress = Signal(int)   # 进度信号
     error = Signal(str)      # 错误信号
 
 
 class OCRWorker(QRunnable):
-    """OCR识别工作线程 - 增强版"""
-    
+    """PaddleOCR识别工作线程 - 使用您训练的专用模型"""
+
     def __init__(self, image_path: str, languages: list = ['ch_sim', 'en'], masked_regions: list = None):
         super().__init__()
         self.image_path = image_path
-        self.languages = languages
-        self.masked_regions = masked_regions or []  # 屏蔽区域列表
-        self.signals = OCRWorkerSignals()
-        self._reader = None
-        
+        self.languages = languages  # 保持兼容性，但PaddleOCR不使用这个参数
+        self.masked_regions = masked_regions or []
+        self.signals = PaddleOCRWorkerSignals()
+
+        # 配置字典 - 使用您现有的配置
+        self.config_dict = {
+            "ocr_det_config": os.path.join(paddleocr_root, "model", "det_best_model", "config.yml"),
+            "ocr_rec_config": os.path.join(paddleocr_root, "configs", "rec", "PP-OCRv4", "ch_PP-OCRv4_rec_hgnet.yml")
+        }
+
+        # OCR处理器
+        self.ocr_processor = None
+
     def run(self):
-        """执行OCR识别 - 多策略增强版"""
-        if not HAS_OCR_SUPPORT:
-            self.signals.error.emit("OCR功能未启用，请安装完整依赖包")
+        """执行PaddleOCR识别"""
+        if not PADDLE_AVAILABLE:
+            self.signals.error.emit("PaddleOCR功能未启用，请安装PaddlePaddle")
             return
-            
+
+        try:
+            # 设置使用CPU
+            paddle.set_device('cpu')
+            print("🖥️ 使用CPU进行PaddleOCR识别")
+
+            # 初始化OCR处理器
+            self.signals.progress.emit(10)
+            print("🔧 正在初始化PaddleOCR模型...")
+
+            # 导入您的OCR处理类
+            sys.path.insert(0, paddleocr_root)
+            from infer_tu2 import OCR_process
+
+            self.ocr_processor = OCR_process(self.config_dict)
+            print("✅ 模型初始化完成")
+            self.signals.progress.emit(30)
+
+            # 读取图像
+            print(f"📖 正在处理文件: {self.image_path}")
+            image = cv2.imread(self.image_path)
+            if image is None:
+                raise Exception(f"无法读取图像文件: {self.image_path}")
+
+            print(f"🖼️ 图像读取成功，尺寸: {image.shape}")
+            self.signals.progress.emit(50)
+
+            # 使用您的OCR处理器进行识别
+            print("🔍 开始OCR识别...")
+            img_list = [image]
+
+            # 调用您的process_imgs方法
+            ocr_results = self._process_with_your_ocr(img_list)
+
+            print(f"✅ 识别完成，共识别 {len(ocr_results)} 个文本")
+            self.signals.progress.emit(90)
+
+            # 处理结果为PyQt需要的格式
+            final_results = self._format_results_for_pyqt(ocr_results, image.shape)
+
+            self.signals.progress.emit(100)
+            self.signals.finished.emit(final_results)
+
+        except Exception as e:
+            error_msg = f"PaddleOCR识别失败: {str(e)}"
+            print(f"❌ {error_msg}")
+            import traceback
+            traceback.print_exc()
+            self.signals.error.emit(error_msg)
+
+    def _process_with_your_ocr(self, img_list):
+        """使用您的OCR处理器进行识别"""
+        try:
+            # 获取检测框
+            boxes = self.ocr_processor.ocr_det.predict(img_list)
+            if len(boxes) == 0:
+                return []
+
+            results = []
+            for i, i_boxes in enumerate(boxes):
+                crop_img_list = []
+                sortboxes = self.ocr_processor.sort_boxes(i_boxes)
+
+                for box in sortboxes:
+                    bbox_info = self.ocr_processor.get_bbox_info(box)
+                    crop_img = self.ocr_processor.rectify_crop(img_list[i], bbox_info)
+                    crop_img_list.append(crop_img)
+
+                # 获取识别结果
+                info_stream = self.ocr_processor.ocr_rec.predict(crop_img_list)
+
+                for idx, info in enumerate(info_stream):
+                    if info and '\t' in info:
+                        ocr_str = info.split("\t")
+                        text = ocr_str[0]
+                        confidence = float(ocr_str[1]) if len(ocr_str) > 1 else 0.9
+
+                        # 过滤掉包含#的文本
+                        if '#' not in text and text.strip():
+                            results.append({
+                                'text': text,
+                                'confidence': confidence,
+                                'bbox': sortboxes[idx].tolist() if idx < len(sortboxes) else []
+                            })
+
+            return results
+
+        except Exception as e:
+            print(f"❌ OCR处理失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    def _format_results_for_pyqt(self, ocr_results, image_shape):
+        """将OCR结果格式化为PyQt需要的格式"""
+        formatted_results = []
+
+        for result in ocr_results:
+            bbox = result['bbox']
+            text = result['text']
+            confidence = result['confidence']
+
+            if not bbox or len(bbox) < 4:
+                continue
+
+            # 计算中心点和边界框尺寸
+            bbox_array = np.array(bbox)
+            center_x = int(np.mean(bbox_array[:, 0]))
+            center_y = int(np.mean(bbox_array[:, 1]))
+
+            # 计算边界框尺寸
+            bbox_width = int(np.max(bbox_array[:, 0]) - np.min(bbox_array[:, 0]))
+            bbox_height = int(np.max(bbox_array[:, 1]) - np.min(bbox_array[:, 1]))
+
+            # 屏蔽区域过滤
+            if self.masked_regions and self._is_bbox_in_masked_region(bbox):
+                continue
+
+            # 清理文本
+            clean_text = self._clean_text(text)
+            if not clean_text:
+                continue
+
+            # 分类文本类型
+            text_type = self._classify_mechanical_text(clean_text)
+
+            formatted_results.append({
+                'text': clean_text,
+                'confidence': confidence,
+                'center_x': center_x,
+                'center_y': center_y,
+                'bbox_width': bbox_width,
+                'bbox_height': bbox_height,
+                'bbox': bbox,
+                'text_type': text_type,
+                'original_text': text
+            })
+
+        return formatted_results
+
+    def _is_bbox_in_masked_region(self, bbox):
+        """检查边界框是否在屏蔽区域内"""
+        if not self.masked_regions:
+            return False
+
+        bbox_array = np.array(bbox)
+        center_x = np.mean(bbox_array[:, 0])
+        center_y = np.mean(bbox_array[:, 1])
+
+        for region in self.masked_regions:
+            if (region.get('x', 0) <= center_x <= region.get('x', 0) + region.get('width', 0) and
+                region.get('y', 0) <= center_y <= region.get('y', 0) + region.get('height', 0)):
+                return True
+        return False
+
+    def _clean_text(self, text):
+        """清理识别的文本"""
+        # 移除多余空格
+        text = re.sub(r'\s+', ' ', text.strip())
+
+        # 修正常见的OCR错误
+        corrections = {
+            'Φ': 'Φ',  # 直径符号
+            '∅': 'Φ',
+            'ø': 'Φ',
+            'M': 'M',   # 螺纹标记
+            '×': '×',   # 乘号
+            '°': '°',   # 度数符号
+        }
+
+        for wrong, correct in corrections.items():
+            text = text.replace(wrong, correct)
+
+        return text
+
+    def _classify_mechanical_text(self, text):
+        """分类机械图纸文本类型"""
+        # 螺纹规格
+        if re.match(r'M\d+', text, re.IGNORECASE):
+            return 'thread_spec'
+
+        # 直径标注
+        if 'Φ' in text or '∅' in text or 'ø' in text:
+            return 'diameter'
+
+        # 尺寸标注
+        if re.search(r'\d+\.?\d*\s*[×x]\s*\d+\.?\d*', text):
+            return 'dimension'
+
+        # 角度标注
+        if '°' in text and any(c.isdigit() for c in text):
+            return 'angle'
+
+        # 数值
+        if re.match(r'^\d+\.?\d*$', text):
+            return 'number'
+
+        # 材料标记
+        material_keywords = ['钢', '铁', '铜', '铝', '不锈钢', 'steel', 'iron', 'copper', 'aluminum']
+        if any(keyword.lower() in text.lower() for keyword in material_keywords):
+            return 'material'
+
+        # 表面处理
+        surface_keywords = ['镀锌', '发黑', '阳极', '喷涂', 'zinc', 'black', 'anodize', 'coating']
+        if any(keyword.lower() in text.lower() for keyword in surface_keywords):
+            return 'surface_treatment'
+
+        # 默认为标注文本
+        return 'annotation'
         try:
             # 初始化EasyOCR（优化版）
             if not self._reader:

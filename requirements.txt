@@ -1,10 +1,57 @@
+# PyQt界面框架
 PySide6>=6.0.0
-Pillow>=9.0.0
-PyMuPDF>=1.20.0
+
+# 图像处理库 - 使用您当前环境的版本
+Pillow==11.2.1
+opencv-python==4.11.0.86
+numpy==1.25.2
+
+# 文件格式支持
+PyMuPDF==1.26.0  # PDF处理和转换
 ezdxf>=1.0.0
-easyocr>=1.7.0
-opencv-python>=4.8.0
-numpy>=1.24.0
-torch>=2.0.0
-torchvision>=0.15.0 
+
+# 移除EasyOCR依赖，专注使用PaddleOCR
+
+# OCR引擎 - PaddleOCR (主要方案) - 使用CPU版本
+paddlepaddle==2.6.1
+paddleocr==2.9.0
+
+# PaddleOCR相关依赖 - 使用您当前环境的版本
+PyYAML==6.0.2
+shapely==2.1.1
+scikit-image==0.25.2
+imgaug==0.4.0
+pyclipper==1.3.0.post6
+tqdm==4.67.1
+RapidFuzz==3.13.0
+opencv-contrib-python==4.11.0.86
+
+# albumentations (无torch依赖)
+albumentations==2.0.8
+albucore==0.0.24
+
+# 数据处理 - 使用您当前环境的版本
+pandas==2.2.3
+
+# 系统监控和进程管理
+psutil>=5.9.0
+
+# PaddlePaddle核心依赖
+protobuf==3.20.2
+decorator
+astor
+httpx
+opt-einsum
+
+# 其他工具库
+six>=1.16.0
+requests>=2.25.0
 openpyxl>=3.1.0
+
+# 注意事项:
+# 1. 本requirements.txt专为PaddleOCR + PyQt应用设计
+# 2. 已移除EasyOCR和PyTorch依赖，避免DLL冲突
+# 3. 使用CPU版本的PaddlePaddle，适合无GPU环境
+# 4. 所有版本号与您的工作环境保持一致
+# 5. psutil是infer_tu2.py脚本的必需依赖
+# 6. PyMuPDF是PDF处理和转换必须的库

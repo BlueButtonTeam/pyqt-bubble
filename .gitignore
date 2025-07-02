@@ -5,4 +5,5 @@ core/__pycache__/
 utils/__pycache__/
 ui/__pycache__/
 *.pdf
-
+*.pdparams
+*.pdopt

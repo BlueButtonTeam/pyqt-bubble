@@ -19,9 +19,11 @@ class PropertyEditor(QWidget):
     """
     
     audit_requested = Signal()
+    delete_requested = Signal()
 
-    def __init__(self):
+    def __init__(self, main_window=None):
         super().__init__()
+        self.main_window = main_window
         self.current_annotation: Optional[BubbleAnnotationItem] = None
         self.original_pixmap: Optional[QPixmap] = None
         # --- 新增：用于控制预览图的缩放系数 ---
@@ -75,12 +77,19 @@ class PropertyEditor(QWidget):
         self.audit_button.setStyleSheet(f"QPushButton {{ background-color: #28a745; color: white; font-weight: bold; padding: 8px; }} QPushButton:hover {{ background-color: #218838; }} QPushButton:disabled {{ background-color: #e9ecef; color: #6c757d; }}")
         main_layout.addWidget(self.audit_button)
         
+        # 添加删除按钮
+        self.delete_button = QPushButton("🗑️ 删除")
+        self.delete_button.setToolTip("删除当前选中的标注项")
+        self.delete_button.setStyleSheet(f"QPushButton {{ background-color: #dc3545; color: white; font-weight: bold; padding: 8px; }} QPushButton:hover {{ background-color: #c82333; }} QPushButton:disabled {{ background-color: #e9ecef; color: #6c757d; }}")
+        main_layout.addWidget(self.delete_button)
+        
         # 连接信号和槽
         self.dimension_edit.editingFinished.connect(self._on_dimension_changed)
         self.type_combo.currentTextChanged.connect(self._on_type_changed)
         self.upper_tol_edit.editingFinished.connect(self._on_upper_tol_changed)
         self.lower_tol_edit.editingFinished.connect(self._on_lower_tol_changed)
         self.audit_button.clicked.connect(self.audit_requested.emit)
+        self.delete_button.clicked.connect(self.delete_requested.emit)
         
         main_layout.addStretch()
         
@@ -221,19 +230,27 @@ class PropertyEditor(QWidget):
         self.upper_tol_edit.blockSignals(block)
         self.lower_tol_edit.blockSignals(block)
         self.audit_button.blockSignals(block)
+        self.delete_button.blockSignals(block)
 
     def _on_dimension_changed(self):
         if self.current_annotation:
-            self.current_annotation.set_dimension(self.dimension_edit.text())
+            new_dimension = self.dimension_edit.text()
+            if new_dimension != self.current_annotation.dimension:
+                self.current_annotation.set_dimension(new_dimension)
 
     def _on_type_changed(self, text: str):
         if self.current_annotation:
-            self.current_annotation.set_dimension_type(text)
+            if text != self.current_annotation.dimension_type:
+                self.current_annotation.set_dimension_type(text)
 
     def _on_upper_tol_changed(self):
         if self.current_annotation:
-            self.current_annotation.set_upper_tolerance(self.upper_tol_edit.text())
+            new_value = self.upper_tol_edit.text()
+            if new_value != self.current_annotation.upper_tolerance:
+                self.current_annotation.set_upper_tolerance(new_value)
     
     def _on_lower_tol_changed(self):
         if self.current_annotation:
-            self.current_annotation.set_lower_tolerance(self.lower_tol_edit.text())
+            new_value = self.lower_tol_edit.text()
+            if new_value != self.current_annotation.lower_tolerance:
+                self.current_annotation.set_lower_tolerance(new_value)

@@ -20,7 +20,7 @@ torchvision>=0.15.0
 
 import sys
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QImageReader
 
 from utils.constants import APP_NAME, APP_VERSION
 from ui.main_window import MainWindow
@@ -29,6 +29,9 @@ from ui.main_window import MainWindow
 def main():
     """主函数"""
     app = QApplication(sys.argv)
+    
+    # 设置QImageReader内存限制
+    QImageReader.setAllocationLimit(1024)
     
     # 设置应用属性
     app.setApplicationName(APP_NAME)

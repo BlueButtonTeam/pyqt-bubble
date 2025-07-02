@@ -9,15 +9,15 @@ APP_VERSION = "1.0"
 APP_TITLE = "IntelliAnnotate - 智能图纸标注工具 (EasyOCR)"
 
 # 文件格式支持
-SUPPORTED_IMAGE_FORMATS = ['.png', '.jpg', '.jpeg']
+SUPPORTED_IMAGE_FORMATS = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.gif']
 SUPPORTED_PDF_FORMATS = ['.pdf']
 SUPPORTED_DXF_FORMATS = ['.dxf']
 SUPPORTED_ALL_FORMATS = SUPPORTED_IMAGE_FORMATS + SUPPORTED_PDF_FORMATS + SUPPORTED_DXF_FORMATS
 
 # 文件对话框过滤器
 FILE_DIALOG_FILTER = (
-    "所有支持的文件 (*.png *.jpg *.jpeg *.pdf *.dxf);;"
-    "图像文件 (*.png *.jpg *.jpeg);;"
+    "所有支持的文件 (*.png *.jpg *.jpeg *.pdf *.dxf *.bmp *.tiff *.tif *.gif);;"
+    "图像文件 (*.png *.jpg *.jpeg *.bmp *.tiff *.tif *.gif);;"
     "PDF文件 (*.pdf);;"
     "DXF文件 (*.dxf)"
 )
@@ -165,3 +165,12 @@ DEFAULT_WINDOW_POSITION = (100, 100)
 DEFAULT_CIRCLE_RADIUS = 15
 DEFAULT_LEADER_LENGTH = 30
 MIN_SELECTION_AREA = 10  # 最小选择区域像素 
+
+# 气泡大小滑块常量
+BUBBLE_SIZE_MIN_PERCENT = 50    # 最小50%比例
+BUBBLE_SIZE_MAX_PERCENT = 160   # 最大160%比例
+BUBBLE_SIZE_DEFAULT_PERCENT = 100  # 默认100%比例
+BUBBLE_SIZE_STEP = 10  # 步长10%
+
+# 气泡排序常量
+BUBBLE_REORDER_GRID_SIZE = 50  # 排序时使用的网格大小，用于从上到下从左到右的排序
