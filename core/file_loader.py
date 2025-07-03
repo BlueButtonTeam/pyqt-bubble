@@ -47,90 +47,54 @@ class FileLoader:
             return None
     
     @staticmethod
-    def load_pdf(file_path: str, zoom_factor: float = 4.0, page_num: int = 0) -> Optional[QPixmap]:
-        """加载PDF文件（高清晰度优化版）"""
+    def get_pdf_page_count(file_path: str) -> int:
+        """获取PDF文件的页数"""
         if not HAS_OCR_SUPPORT:
-            return None
+            return 0
+        try:
+            doc = fitz.open(file_path)
+            page_count = len(doc)
+            doc.close()
+            return page_count
+        except Exception as e:
+            print(f"获取PDF页数失败: {e}")
+            return 0
+            
+    @staticmethod
+    def load_pdf(file_path: str, scene: QGraphicsScene, page_num: int = 0, quality: float = 2.0) -> Tuple[QPixmap, str]:
+        """加载PDF文件并转换为临时图像
+        
+        Args:
+            file_path: PDF文件路径
+            scene: 要添加图像的场景
+            page_num: 页码
+            quality: 渲染质量
+            
+        Returns:
+            Tuple[QPixmap, str]: (图像, 临时文件路径)
+        """
+        if not HAS_OCR_SUPPORT:
+            return QPixmap(), ""
             
         try:
-            print(f"正在以 {zoom_factor}x 分辨率加载PDF...")
-            
-            doc = fitz.open(file_path)
-            if page_num >= len(doc):
-                page_num = 0
-            
-            page = doc.load_page(page_num)
-            
-            # 设置高分辨率渲染参数
-            mat = fitz.Matrix(zoom_factor, zoom_factor)
-            
-            print(f"开始渲染PDF页面 (分辨率倍数: {zoom_factor}x)...")
-            
-            # 使用高质量渲染选项
-            pix = page.get_pixmap(
-                matrix=mat,
-                alpha=False,  # 不需要透明度通道，提高性能
-                annots=True,  # 包含注释
-                clip=None     # 不裁剪
-            )
-            
-            # 获取图像数据
-            img_data = pix.tobytes("png")
-            
-            print(f"PDF页面渲染完成，尺寸: {pix.width}x{pix.height}")
-            
-            # 如果有PIL支持，进行额外的图像优化
-            if Image is not None:
-                try:
-                    print("正在进行图像后处理优化...")
-                    # 使用PIL进行图像后处理优化
-                    pil_image = Image.open(io.BytesIO(img_data))
-                    
-                    # 应用锐化滤镜提高文字清晰度
-                    # 轻微锐化
-                    pil_image = pil_image.filter(ImageFilter.UnsharpMask(
-                        radius=1.0,      # 锐化半径
-                        percent=120,     # 锐化强度
-                        threshold=1      # 锐化阈值
-                    ))
-                    
-                    # 增强对比度，让文字更清晰
-                    enhancer = ImageEnhance.Contrast(pil_image)
-                    pil_image = enhancer.enhance(1.1)  # 轻微增强对比度
-                    
-                    # 转换回QPixmap
-                    buffer = io.BytesIO()
-                    pil_image.save(buffer, format='PNG', quality=100, optimize=True)
-                    buffer.seek(0)
-                    
-                    pixmap = QPixmap()
-                    pixmap.loadFromData(buffer.getvalue())
-                    
-                    print("图像后处理优化完成")
-                    
-                except Exception as e:
-                    print(f"PIL图像后处理失败，使用原始渲染: {e}")
-                    # 如果PIL处理失败，回退到原始方法
-                    pixmap = QPixmap()
-                    pixmap.loadFromData(img_data)
-            else:
-                # 没有PIL支持时的原始方法
-                pixmap = QPixmap()
-                pixmap.loadFromData(img_data)
-            
-            doc.close()
-            
-            # 检查是否成功加载
-            if pixmap.isNull():
-                print("警告: PDF渲染结果为空")
-                return None
+            # 先将PDF转为PNG
+            png_path, error = FileLoader.convert_pdf_to_png(file_path, quality, page_num)
+            if error or not png_path:
+                raise Exception(f"PDF转换失败: {error}")
                 
-            print(f"✅ PDF加载成功 - 渲染尺寸: {pix.width}x{pix.height}, 最终尺寸: {pixmap.width()}x{pixmap.height()}")
-            return pixmap
+            # 加载PNG
+            pixmap = QPixmap(png_path)
+            if pixmap.isNull():
+                raise Exception("图像加载失败")
+                
+            # 添加到场景
+            scene.addPixmap(pixmap)
+            
+            return pixmap, png_path
             
         except Exception as e:
-            print(f"❌ 加载PDF失败: {e}")
-            return None
+            print(f"加载PDF失败: {e}")
+            return QPixmap(), ""
     
     @staticmethod
     def convert_pdf_to_png(pdf_path: str, zoom_factor: float = 4.0, page_num: int = 0) -> Tuple[Optional[str], Optional[str]]:

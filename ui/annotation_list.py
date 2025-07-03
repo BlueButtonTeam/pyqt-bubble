@@ -1,17 +1,25 @@
 # ui/annotation_list.py
 
+import sys
+import os
+
+# 添加项目根目录到Python路径
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from PySide6.QtWidgets import QTableWidget, QTableWidgetItem, QAbstractItemView, QHeaderView
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFont
 
 # 导入我们的数据模型类
 from core.annotation_item import BubbleAnnotationItem
+from utils.constants import GDT_SYMBOL_MAP, GDT_TEXT_MAP
 
 class AnnotationTable(QTableWidget):
     """
     一个用于显示结构化标注数据的表格视图。
     - 调整了审核状态列的宽度
     - 显示审核状态的勾号
+    - 支持GD&T符号显示
     """
     annotation_selected = Signal(int)
 
@@ -79,7 +87,17 @@ class AnnotationTable(QTableWidget):
         id_item.setData(Qt.ItemDataRole.UserRole, annotation.annotation_id)
         self.setItem(row_position, 0, id_item)
         
-        self.setItem(row_position, 1, QTableWidgetItem(annotation.dimension_type))
+        # 使用GD&T符号映射表转换显示
+        dim_type = annotation.dimension_type
+        symbol = GDT_SYMBOL_MAP.get(dim_type, dim_type)  # 如果找不到对应符号，就使用原文本
+        
+        type_item = QTableWidgetItem(symbol)
+        # 设置更大的字体，使符号更清晰
+        font = QFont("Arial", 14, QFont.Bold)
+        type_item.setFont(font)
+        type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)  # 居中对齐
+        self.setItem(row_position, 1, type_item)
+        
         self.setItem(row_position, 2, QTableWidgetItem(annotation.dimension))
         self.setItem(row_position, 3, QTableWidgetItem(annotation.upper_tolerance))
         self.setItem(row_position, 4, QTableWidgetItem(annotation.lower_tolerance))
@@ -91,12 +109,32 @@ class AnnotationTable(QTableWidget):
         self.setItem(row_position, 5, audit_item)
         # ---------------------------
 
-        tooltip_text = f"标注 {annotation.annotation_id}\n原始文本: {annotation.text}"
+        tooltip_text = f"标注 {annotation.annotation_id}\n"
+        if dim_type != symbol:  # 如果使用了符号替换，在提示中显示原文本
+            tooltip_text += f"类型: {GDT_TEXT_MAP.get(symbol, dim_type)}\n"
+        tooltip_text += f"原始文本: {annotation.text}"
+        
         for col in range(self.columnCount()):
             self.item(row_position, col).setToolTip(tooltip_text)
 
     def clear_annotations(self):
         self.setRowCount(0)
+
+    def sort_annotations(self, annotations):
+        """按照标注ID排序，然后批量添加到表格
+        
+        Args:
+            annotations: 要排序并添加的标注列表
+        """
+        # 按照标注ID进行排序
+        sorted_annotations = sorted(annotations, key=lambda ann: ann.annotation_id)
+        
+        # 清空现有表格
+        self.clear_annotations()
+        
+        # 按顺序添加排序后的标注
+        for annotation in sorted_annotations:
+            self.add_annotation(annotation, {})
 
     def _on_item_clicked(self, item: QTableWidgetItem):
         id_item = self.item(item.row(), 0)
@@ -116,8 +154,17 @@ class AnnotationTable(QTableWidget):
         for row in range(self.rowCount()):
             item = self.item(row, 0)
             if item and item.data(Qt.ItemDataRole.UserRole) == annotation.annotation_id:
-                # 更新这一行的所有相关数据
-                self.item(row, 1).setText(annotation.dimension_type)
+                # 使用GD&T符号映射表转换显示
+                dim_type = annotation.dimension_type
+                symbol = GDT_SYMBOL_MAP.get(dim_type, dim_type)  # 如果找不到对应符号，就使用原文本
+                
+                type_item = self.item(row, 1)
+                type_item.setText(symbol)
+                # 设置更大的字体，使符号更清晰
+                font = QFont("Arial", 14, QFont.Bold)
+                type_item.setFont(font)
+                type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)  # 居中对齐
+                
                 self.item(row, 2).setText(annotation.dimension)
                 self.item(row, 3).setText(annotation.upper_tolerance)
                 self.item(row, 4).setText(annotation.lower_tolerance)
@@ -128,5 +175,12 @@ class AnnotationTable(QTableWidget):
                 self.item(row, 5).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 # ---------------------------
                 
-                self.item(row,0).setToolTip(f"标注 {annotation.annotation_id}\n原始文本: {annotation.text}")
+                tooltip_text = f"标注 {annotation.annotation_id}\n"
+                if dim_type != symbol:  # 如果使用了符号替换，在提示中显示原文本
+                    tooltip_text += f"类型: {GDT_TEXT_MAP.get(symbol, dim_type)}\n"
+                tooltip_text += f"原始文本: {annotation.text}"
+                
+                for col in range(self.columnCount()):
+                    self.item(row, col).setToolTip(tooltip_text)
+                    
                 break   

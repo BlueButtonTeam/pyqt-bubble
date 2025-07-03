@@ -1,6 +1,11 @@
 # ui/property_editor.py
 
 from typing import Optional
+import sys
+import os
+
+# 添加项目根目录到Python路径
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QLabel, QLineEdit, QComboBox, QGroupBox, QPushButton
@@ -28,6 +33,7 @@ class PropertyEditor(QWidget):
         self.original_pixmap: Optional[QPixmap] = None
         # --- 新增：用于控制预览图的缩放系数 ---
         self.preview_zoom_factor = 1.0
+        self.preview_rect: Optional[QRectF] = None
         self.setup_ui()
     
     def setup_ui(self):
@@ -61,7 +67,39 @@ class PropertyEditor(QWidget):
         form_layout.addRow("尺寸:", self.dimension_edit)
 
         self.type_combo = QComboBox()
-        self.type_combo.addItems(["", "线性", "直径(Φ)", "半径(R)", "螺纹", "角度(°)", "其他"])
+        self.type_combo.addItem("")  # 空选项
+        self.type_combo.addItem("⏤")  # 直线度 (Straightness)
+        self.type_combo.addItem("⏥")  # 平面度 (Flatness)
+        self.type_combo.addItem("⌀")  # 直径符号 (Diameter)
+        self.type_combo.addItem("R")  # 半径 (Radius)
+        self.type_combo.addItem("⌒")  # 圆弧 (Arc)
+        self.type_combo.addItem("⌓")  # 线段 (Segment)
+        self.type_combo.addItem("⋭")  # 圆柱度 (Cylindricity)
+        self.type_combo.addItem("⋮")  # 全周轮廓度 (All Around-Profile)
+        self.type_combo.addItem("⋯")  # 对称度 (Symmetry)
+        self.type_combo.addItem("⌰")  # 总跳动 (Total Runout)
+        self.type_combo.addItem("⌱")  # 尺寸原点 (Dimension Origin)
+        self.type_combo.addItem("⌲")  # 锥度 (Conical Taper)
+        self.type_combo.addItem("⌳")  # 斜度 (Slope)
+        self.type_combo.addItem("⌴")  # 反锥孔 (Counterbore)
+        self.type_combo.addItem("⌵")  # 沉孔 (Countersink)
+        self.type_combo.addItem("°")  # 角度 (Angle)
+        self.type_combo.addItem("M")  # 公制螺纹 (Metric Thread)
+        
+        # 设置符号下拉框样式
+        self.type_combo.setStyleSheet("""
+            QComboBox { 
+                font-size: 16px;
+                font-weight: bold;
+                padding: 4px;
+                min-height: 30px;
+            }
+            QComboBox QAbstractItemView {
+                font-size: 16px;
+                font-weight: bold;
+                padding: 4px;
+            }
+        """)
         form_layout.addRow("尺寸类型:", self.type_combo)
 
         self.upper_tol_edit = QLineEdit()
@@ -151,9 +189,10 @@ class PropertyEditor(QWidget):
             
         return super().eventFilter(watched, event)
 
-    def set_annotation(self, annotation: Optional[BubbleAnnotationItem], pixmap: Optional[QPixmap]):
+    def set_annotation(self, annotation: Optional[BubbleAnnotationItem], pixmap: Optional[QPixmap], preview_rect: Optional[QRectF] = None):
         self.current_annotation = annotation
         self.original_pixmap = pixmap
+        self.preview_rect = preview_rect
         
         # --- 修改：每次选中新标注时，重置缩放系数 ---
         self.preview_zoom_factor = 1.0
@@ -162,7 +201,27 @@ class PropertyEditor(QWidget):
             self.block_signals(True)
             self.id_label.setText(str(annotation.annotation_id))
             self.dimension_edit.setText(annotation.dimension)
-            self.type_combo.setCurrentText(annotation.dimension_type)
+            
+            # 处理尺寸类型 - 转换旧的文本格式到新的符号格式
+            dim_type = annotation.dimension_type
+            if dim_type == "直径(Φ)" or dim_type == "Φ":
+                self.type_combo.setCurrentText("⌀")
+            elif dim_type == "半径(R)" or dim_type == "R":
+                self.type_combo.setCurrentText("R")
+            elif dim_type == "角度(°)" or dim_type == "°":
+                self.type_combo.setCurrentText("°")
+            elif dim_type == "线性":
+                self.type_combo.setCurrentText("⏤")
+            elif dim_type == "螺纹":
+                self.type_combo.setCurrentText("M")
+            else:
+                # 尝试直接匹配符号
+                index = self.type_combo.findText(dim_type)
+                if index >= 0:
+                    self.type_combo.setCurrentIndex(index)
+                else:
+                    self.type_combo.setCurrentIndex(0)  # 默认为空
+            
             self.upper_tol_edit.setText(annotation.upper_tolerance)
             self.lower_tol_edit.setText(annotation.lower_tolerance)
             self.block_signals(False)
@@ -191,38 +250,93 @@ class PropertyEditor(QWidget):
         base_preview_width = 200
         base_preview_height = 150
         
-        # --- 修改：根据缩放系数计算实际要截取的区域大小 ---
-        crop_width = base_preview_width / self.preview_zoom_factor
-        crop_height = base_preview_height / self.preview_zoom_factor
+        try:
+            # 使用从主窗口传递的预览区域（如果有的话）
+            if hasattr(self, 'preview_rect') and self.preview_rect:
+                # 应用缩放系数
+                center_x = self.preview_rect.center().x()
+                center_y = self.preview_rect.center().y()
+                
+                # 根据缩放因子调整宽高
+                scaled_width = self.preview_rect.width() / self.preview_zoom_factor
+                scaled_height = self.preview_rect.height() / self.preview_zoom_factor
+                
+                # 计算新的预览区域
+                left = max(0, int(center_x - scaled_width / 2))
+                top = max(0, int(center_y - scaled_height / 2))
+                width = min(self.original_pixmap.width() - left, int(scaled_width))
+                height = min(self.original_pixmap.height() - top, int(scaled_height))
+                
+                crop_rect = QRectF(left, top, width, height).toRect()
+                
+                print(f"使用传递的预览区域: ({left}, {top}, {width}, {height})")
+            else:
+                # 如果没有预览区域，回退到默认方法
+                print("没有预览区域，使用默认计算方法")
+                # --- 修改：根据缩放系数计算实际要截取的区域大小 ---
+                crop_width = int(base_preview_width / self.preview_zoom_factor)
+                crop_height = int(base_preview_height / self.preview_zoom_factor)
+                
+                # 获取锚点在场景中的坐标
+                anchor_pos = self.current_annotation.anchor_point
+                
+                # 检查锚点的bbox_points，如果有的话使用bbox中心点
+                if hasattr(self.current_annotation, 'bbox_points') and self.current_annotation.bbox_points:
+                    # 如果有边界框信息，使用边界框中心
+                    bbox_points = self.current_annotation.bbox_points
+                    sum_x = sum(p.x() for p in bbox_points)
+                    sum_y = sum(p.y() for p in bbox_points)
+                    center_x = sum_x / len(bbox_points)
+                    center_y = sum_y / len(bbox_points)
+                    # 使用边界框中心点作为预览中心
+                    anchor_x = int(center_x)
+                    anchor_y = int(center_y)
+                    print(f"使用bbox中心点: ({anchor_x}, {anchor_y})")
+                else:
+                    # 使用锚点坐标
+                    anchor_x = int(anchor_pos.x())
+                    anchor_y = int(anchor_pos.y())
+                    print(f"使用锚点: ({anchor_x}, {anchor_y})")
+                
+                # 确保坐标在图像范围内
+                anchor_x = max(0, min(anchor_x, self.original_pixmap.width() - 1))
+                anchor_y = max(0, min(anchor_y, self.original_pixmap.height() - 1))
+                
+                # 计算裁剪区域，确保不会超出图像边界
+                left = max(0, anchor_x - crop_width // 2)
+                top = max(0, anchor_y - crop_height // 2)
+                right = min(self.original_pixmap.width(), left + crop_width)
+                bottom = min(self.original_pixmap.height(), top + crop_height)
+                
+                # 最终的裁剪区域
+                crop_rect = QRectF(left, top, right - left, bottom - top).toRect()
+            
+            # 调试输出
+            print(f"原始图像尺寸: {self.original_pixmap.width()}x{self.original_pixmap.height()}")
+            print(f"裁剪区域: {crop_rect}")
+            
+            if crop_rect.isEmpty() or crop_rect.width() <= 0 or crop_rect.height() <= 0:
+                self.preview_label.setText("预览区域无效")
+                self.preview_label.setPixmap(QPixmap())
+                return
+            
+            # 裁剪图像
+            cropped_pixmap = self.original_pixmap.copy(crop_rect)
+            
+            # 缩放到预览区域大小
+            scaled_pixmap = cropped_pixmap.scaled(
+                self.preview_label.width() - 10,
+                self.preview_label.height() - 10,
+                Qt.AspectRatioMode.KeepAspectRatio, 
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.preview_label.setPixmap(scaled_pixmap)
         
-        anchor_pos = self.current_annotation.anchor_point
-        
-        crop_rect = QRectF(
-            anchor_pos.x() - crop_width / 2,
-            anchor_pos.y() - crop_height / 2,
-            crop_width,
-            crop_height
-        ).toRect().intersected(self.original_pixmap.rect())
-
-        if crop_rect.isEmpty():
-            self.preview_label.setText("预览区域无效")
-            self.preview_label.setPixmap(QPixmap())
-            return
-        
-        cropped_pixmap = self.original_pixmap.copy(crop_rect)
-        
-        # --- 移除：绘制十字准星的代码 ---
-        # painter = QPainter(cropped_pixmap)
-        # ...
-        # painter.end()
-        
-        scaled_pixmap = cropped_pixmap.scaled(
-            self.preview_label.width() - 10,
-            self.preview_label.height() - 10,
-            Qt.AspectRatioMode.KeepAspectRatio, 
-            Qt.TransformationMode.SmoothTransformation
-        )
-        self.preview_label.setPixmap(scaled_pixmap)
+        except Exception as e:
+            self.preview_label.setText(f"预览错误: {str(e)}")
+            print(f"预览错误: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def block_signals(self, block: bool):
         self.dimension_edit.blockSignals(block)
@@ -239,6 +353,7 @@ class PropertyEditor(QWidget):
                 self.current_annotation.set_dimension(new_dimension)
 
     def _on_type_changed(self, text: str):
+        """当尺寸类型改变时调用"""
         if self.current_annotation:
             if text != self.current_annotation.dimension_type:
                 self.current_annotation.set_dimension_type(text)

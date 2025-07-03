@@ -31,7 +31,7 @@ def main():
     app = QApplication(sys.argv)
     
     # 设置QImageReader内存限制
-    QImageReader.setAllocationLimit(1024)
+    QImageReader.setAllocationLimit(2048)
     
     # 设置应用属性
     app.setApplicationName(APP_NAME)
