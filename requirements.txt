@@ -1,3 +1,6 @@
+#python=3.10.8
+
+
 # PyQt界面框架
 PySide6>=6.0.0
 
@@ -12,8 +15,8 @@ ezdxf>=1.0.0
 
 # 移除EasyOCR依赖，专注使用PaddleOCR
 
-# OCR引擎 - PaddleOCR (主要方案) - 使用CPU版本
-paddlepaddle==2.6.1
+# OCR引擎 - PaddleOCR (主要方案) - 修改为GPU版本
+paddlepaddle-gpu==2.6.1
 paddleocr==2.9.0
 
 # PaddleOCR相关依赖 - 使用您当前环境的版本

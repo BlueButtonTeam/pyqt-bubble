@@ -138,8 +138,8 @@ Eval:
     - DetLabelEncode: null
     - DetResizeForTest:
         image_shape:
-        - 736
-        - 736
+        - 3072
+        - 3072
         keep_ratio: true
     - NormalizeImage:
         scale: 1./255.

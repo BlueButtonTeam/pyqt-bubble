@@ -2,20 +2,34 @@
 
 import sys
 import re
+import threading
+import time  # 导入time模块用于计时
+import logging  # 导入logging模块用于日志记录
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any, Union
 from datetime import datetime
+
+# 配置日志记录
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('debug.log', 'w', 'utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger('PyQtBubble')
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QGraphicsScene, QMenuBar, QToolBar, QFileDialog, QMessageBox, 
     QPushButton, QComboBox, QProgressBar, QCheckBox, QSlider, QLabel, QColorDialog, QSpinBox,
-    QDialog, QListWidget, QListWidgetItem, QInputDialog
+    QDialog, QListWidget, QListWidgetItem, QInputDialog, QLineEdit
 )
-from PySide6.QtCore import Qt, QRectF, QPointF, QThreadPool, Signal, Slot, QSettings, QTimer
+from PySide6.QtCore import Qt, QRectF, QPointF, QThreadPool, Signal, Slot, QSettings, QTimer, QObject, QRunnable, QEvent
 from PySide6.QtGui import (
     QPainter, QPixmap, QImage, QColor, QPen, QBrush, QPainterPath, 
-    QAction, QKeySequence
+    QAction, QKeySequence, QIcon, QIntValidator
 )
 from PySide6.QtWidgets import QApplication
 
@@ -61,45 +75,217 @@ if HAS_OCR_SUPPORT:
 #     EditAnnotationColorCommand, EditAnnotationSizeCommand, ClearAnnotationsCommand
 # )
 
+# 添加一个自定义事件类用于从线程传递加载结果到主线程
+class LoadPDFEvent(QEvent):
+    """自定义事件用于将PDF加载结果从线程传递到主线程"""
+    EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
+    
+    def __init__(self, pixmap, temp_path):
+        super().__init__(self.EVENT_TYPE)
+        self.pixmap = pixmap
+        self.temp_path = temp_path
+
+class PDFLoaderSignals(QObject):
+    """PDF加载工作线程的信号类"""
+    finished = Signal(QPixmap, str)  # 成功加载后发出信号：pixmap, 临时文件路径
+    error = Signal(str)  # 加载出错时发出信号
+    progress = Signal(int)  # 加载进度信号
+
+class PDFLoaderWorker(QRunnable):
+    """PDF加载工作线程"""
+    def __init__(self, pdf_path, page_index, quality=4.0, force_resolution=False):
+        super().__init__()
+        self.pdf_path = pdf_path
+        self.page_index = page_index
+        self.quality = quality
+        self.force_resolution = force_resolution
+        self.signals = PDFLoaderSignals()
+        
+    def run(self):
+        """执行PDF加载"""
+        try:
+            start_time = time.time()
+            logger.debug(f"开始加载PDF页面: {self.page_index+1}, 质量: {self.quality}, 强制分辨率: {self.force_resolution}")
+            
+            self.signals.progress.emit(10)
+            # 创建一个临时场景，用于在线程中处理
+            temp_scene = QGraphicsScene()
+            logger.debug(f"创建临时场景耗时: {time.time() - start_time:.2f}秒")
+            
+            self.signals.progress.emit(30)
+            
+            # 调用FileLoader加载PDF
+            logger.debug(f"开始调用FileLoader.load_pdf...")
+            load_start = time.time()
+            pixmap, temp_path = FileLoader.load_pdf(
+                self.pdf_path, temp_scene, self.page_index, quality=self.quality,
+                force_resolution=self.force_resolution
+            )
+            logger.debug(f"FileLoader.load_pdf完成，耗时: {time.time() - load_start:.2f}秒")
+            
+            self.signals.progress.emit(90)
+            
+            if pixmap and not pixmap.isNull() and temp_path:
+                logger.debug(f"PDF页面加载成功: {self.page_index+1}, 尺寸: {pixmap.width()}x{pixmap.height()}")
+                # 成功加载，发送信号
+                self.signals.finished.emit(pixmap, temp_path)
+            else:
+                logger.error(f"PDF页面加载失败: pixmap为空或temp_path为空")
+                # 加载失败
+                self.signals.error.emit("无法加载PDF页面")
+                
+            logger.debug(f"PDF加载线程总耗时: {time.time() - start_time:.2f}秒")
+                
+        except Exception as e:
+            logger.exception(f"PDF加载过程中发生异常: {str(e)}")
+            # 处理异常
+            self.signals.error.emit(str(e))
+
+class FileLoaderSignals(QObject):
+    """文件加载工作线程的信号类"""
+    finished = Signal(str, QPixmap)  # 成功加载后发出信号：文件路径, 图像数据
+    pdf_loaded = Signal(str, int)  # PDF加载成功的信号：文件路径, 页数
+    error = Signal(str)  # 加载出错时发出信号
+    progress = Signal(int, str)  # 加载进度信号：进度值, 描述
+
+class FileLoaderWorker(QRunnable):
+    """文件加载工作线程"""
+    def __init__(self, file_path, pdf_quality="高清 (4x)"):
+        super().__init__()
+        self.file_path = file_path
+        self.pdf_quality = pdf_quality
+        self.signals = FileLoaderSignals()
+        
+    def run(self):
+        """执行文件加载"""
+        try:
+            file_path = Path(self.file_path)
+            extension = file_path.suffix.lower()
+            
+            self.signals.progress.emit(10, f"正在加载文件 {file_path.name}...")
+            
+            # 处理图像文件
+            if extension in SUPPORTED_IMAGE_FORMATS:
+                self.signals.progress.emit(30, f"正在加载图像 {file_path.name}...")
+                pixmap = FileLoader.load_image(str(file_path))
+                if pixmap:
+                    self.signals.progress.emit(90, "图像加载成功")
+                    self.signals.finished.emit(str(file_path), pixmap)
+                else:
+                    self.signals.error.emit(f"无法加载图像文件: {file_path.name}")
+                    
+            # 处理PDF文件
+            elif extension in SUPPORTED_PDF_FORMATS:
+                self.signals.progress.emit(20, f"正在分析PDF文件 {file_path.name}...")
+                
+                # 获取PDF页数
+                page_count = FileLoader.get_pdf_page_count(str(file_path))
+                if page_count == 0:
+                    self.signals.error.emit("无法读取PDF文件或PDF文件不包含任何页面")
+                    return
+                
+                # 通知PDF加载成功
+                self.signals.progress.emit(80, f"PDF文件加载成功，共 {page_count} 页")
+                self.signals.pdf_loaded.emit(str(file_path), page_count)
+                    
+            # 处理DXF文件
+            elif extension in SUPPORTED_DXF_FORMATS:
+                self.signals.error.emit("DXF文件加载尚未实现多线程支持")
+                
+            else:
+                self.signals.error.emit(f"不支持的文件格式: {extension}")
+                
+        except Exception as e:
+            self.signals.error.emit(f"加载文件时发生错误: {str(e)}")
+
 class MainWindow(QMainWindow):
     """
     主窗口类
     """
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(APP_TITLE)
-        self.annotations: List[BubbleAnnotationItem] = []
-        self.annotation_counter = 0
-        self.current_file_path: Optional[str] = None
-        self.current_pixmap: Optional[QPixmap] = None
-        self.ocr_results: List[dict] = []
+        self.setWindowTitle("图纸标注系统")
+        self.setWindowIcon(QIcon("assets/icon.ico"))
+        
+        # 设置初始窗口大小
+        self.setMinimumSize(1200, 800)  # 设置最小大小
+        self.resize(1600, 900)  # 默认初始大小
+        
+        # 创建线程池
         self.thread_pool = QThreadPool()
-        self.current_annotation: Optional[BubbleAnnotationItem] = None
         
-        self.next_annotation_color: Optional[QColor] = None
-        self.next_annotation_size: int = -1  # -1表示自动大小
-        self.next_annotation_scale: float = 1.0  # 默认比例为100%
+        # 初始化对象属性
+        self.graphics_scene = QGraphicsScene()
+        self.graphics_view = None  # 稍后在setup_ui中创建
+        self.property_editor = None  # 稍后在setup_ui中创建
+        self.annotation_table = None  # 稍后在setup_ui中创建
+        self.force_resolution_checkbox = None # 强制分辨率复选框
+        self.current_pixmap = None
+        self.current_file_path = ""
+        self.annotations = []
+        self.current_annotation = None
+        self.annotation_counter = 0
+        self.is_selecting_area = False
         
-        self.masked_regions: List[QRectF] = []
+        # OCR相关
+        self.ocr_worker = None
+        self.ocr_results = []
+        self.area_ocr_worker = None
+        
+        # PDF相关
+        self.pdf_file_path = ""
+        self.pdf_page_count = 0
+        self.current_pdf_page = 0
+        self.previous_page = 0
+        self.pdf_pages_cache = {}  # 页面缓存：{页码: 临时文件路径}
+        
+        # 多页文档的数据存储
+        self.annotations_by_page = {}  # {页码: 标注数据列表}
+        self.ocr_results_by_page = {}  # {页码: OCR结果列表}
+        
+        # 屏蔽区域
+        self.masked_regions = []
+        self.mask_items = []
         self.is_selecting_mask = False
         
-        # 添加多页PDF相关属性
-        self.pdf_file_path: Optional[str] = None  # 原始PDF文件路径
-        self.pdf_page_count: int = 0  # PDF总页数
-        self.current_pdf_page: int = 0  # 当前显示页码 (0-indexed)
-        self.pdf_pages_cache: Dict[int, str] = {}  # 缓存已经转换的PDF页面 {页码: 临时文件路径}
-        self.annotations_by_page: Dict[int, List[BubbleAnnotationItem]] = {}  # 每页的标注 {页码: 标注列表}
-        self.ocr_results_by_page: Dict[int, List[dict]] = {}  # 每页的OCR结果 {页码: OCR结果列表}
+        # 标注颜色
+        self.annotation_color = QColor(255, 0, 0, 200)  # 默认红色，半透明
+        self.next_annotation_color = None  # 用于存储下一个标注的颜色
+        self.next_annotation_scale = 1.0  # 用于存储下一个标注的比例因子
+        self.next_annotation_size = None  # 用于存储下一个标注的大小
         
+        # 创建半透明加载对话框
+        self.create_loading_dialog()
+        
+        # 设置UI
         self.setup_ui()
-        self.setup_menu_bar()
-        self.setup_toolbar()
-        self.setup_connections()
         
-        self.resize(*DEFAULT_WINDOW_SIZE)
+        # 初始化完成后强制处理事件，确保所有UI元素已正确创建
+        QApplication.processEvents()
         
-        self.status_bar = self.statusBar()
-        self.status_bar.showMessage("就绪", 2000)
+        logger.debug("MainWindow初始化完成")
+        
+    def create_loading_dialog(self):
+        """创建半透明的加载对话框"""
+        dialog = QDialog(self, Qt.FramelessWindowHint)
+        dialog.setAttribute(Qt.WA_TranslucentBackground)
+        dialog.setModal(True)  # 设置为模态对话框，阻止其他交互
+        dialog.setStyleSheet("background-color: rgba(0, 0, 0, 180);")
+        
+        layout = QVBoxLayout(dialog)
+        
+        # 加载提示标签
+        label = QLabel("⏳ 正在加载页面...\n请稍候", dialog)
+        label.setStyleSheet("color: white; font-size: 20pt; font-weight: bold; background-color: rgba(0, 0, 0, 200); padding: 40px; border-radius: 20px;")
+        label.setAlignment(Qt.AlignCenter)
+        
+        layout.addWidget(label)
+        layout.setAlignment(Qt.AlignCenter)
+        
+        self.loading_dialog = dialog
+        self.loading_label = label
+        
+        logger.debug("创建了半透明加载对话框")
         
     def setup_ui(self):
         self.setGeometry(*DEFAULT_WINDOW_POSITION, *DEFAULT_WINDOW_SIZE)
@@ -120,30 +306,80 @@ class MainWindow(QMainWindow):
             QSlider::handle:horizontal {{ background-color: #6c757d; border: 1px solid {UI_COLORS["text_secondary"]}; width: 18px; border-radius: 9px; margin: -5px 0; }}
             QSlider::handle:horizontal:hover {{ background-color: {UI_COLORS["text_secondary"]}; }}
         """)
-        central_widget = QWidget(); self.setCentralWidget(central_widget)
-        layout = QHBoxLayout(central_widget); layout.setContentsMargins(5, 5, 5, 5); layout.setSpacing(5)
-        main_splitter = QSplitter(Qt.Horizontal); layout.addWidget(main_splitter)
-        left_splitter = QSplitter(Qt.Vertical)
-        graphics_panel = QWidget(); graphics_layout = QVBoxLayout(graphics_panel); graphics_layout.setContentsMargins(0, 0, 0, 0); graphics_layout.setSpacing(0)
-        graphics_title = QLabel("图纸视图 & OCR识别"); graphics_title.setStyleSheet(f"QLabel {{ background-color: {UI_COLORS['primary']}; color: white; font-weight: bold; padding: 8px; margin: 0px; border: none; }}"); graphics_layout.addWidget(graphics_title)
-        self.setup_compact_ocr_panel(graphics_layout)
-        self.graphics_view = GraphicsView(); self.graphics_scene = QGraphicsScene(); self.graphics_view.setScene(self.graphics_scene); graphics_layout.addWidget(self.graphics_view)
         
-        # --- 修改：移除旧的审核按钮布局 ---
+        # 创建中央部件
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QHBoxLayout(central_widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(5)
+        
+        # 创建分割器
+        main_splitter = QSplitter(Qt.Horizontal)
+        layout.addWidget(main_splitter)
+        left_splitter = QSplitter(Qt.Vertical)
+        
+        # 创建图形视图面板
+        graphics_panel = QWidget()
+        graphics_layout = QVBoxLayout(graphics_panel)
+        graphics_layout.setContentsMargins(0, 0, 0, 0)
+        graphics_layout.setSpacing(0)
+        
+        # 添加图形视图标题
+        graphics_title = QLabel("图纸视图 & OCR识别")
+        graphics_title.setStyleSheet(f"QLabel {{ background-color: {UI_COLORS['primary']}; color: white; font-weight: bold; padding: 8px; margin: 0px; border: none; }}")
+        graphics_layout.addWidget(graphics_title)
+        
+        # 设置OCR面板
+        self.setup_compact_ocr_panel(graphics_layout)
+        
+        # 创建和配置GraphicsView
+        logger.debug("创建GraphicsView实例")
+        self.graphics_view = GraphicsView()
+        self.graphics_view.setScene(self.graphics_scene)
+        graphics_layout.addWidget(self.graphics_view)
+        
+        # 添加标注面板
         annotation_panel = QWidget()
         annotation_layout = QVBoxLayout(annotation_panel)
-        annotation_layout.setContentsMargins(0, 0, 0, 0); annotation_layout.setSpacing(0)
-        annotation_title = QLabel("标注列表"); annotation_title.setStyleSheet(f"QLabel {{ background-color: {UI_COLORS['secondary']}; color: white; font-weight: bold; padding: 8px; margin: 0px; border: none; }}"); annotation_layout.addWidget(annotation_title)
-        self.annotation_table = AnnotationTable(); annotation_layout.addWidget(self.annotation_table)
+        annotation_layout.setContentsMargins(0, 0, 0, 0)
+        annotation_layout.setSpacing(0)
         
-        left_splitter.addWidget(graphics_panel); left_splitter.addWidget(annotation_panel)
-        left_splitter.setStretchFactor(0, 3); left_splitter.setStretchFactor(1, 1)
+        # 标注面板标题
+        annotation_title = QLabel("标注列表")
+        annotation_title.setStyleSheet(f"QLabel {{ background-color: {UI_COLORS['secondary']}; color: white; font-weight: bold; padding: 8px; margin: 0px; border: none; }}")
+        annotation_layout.addWidget(annotation_title)
         
-        right_panel = QWidget(); right_layout = QVBoxLayout(right_panel); right_layout.setContentsMargins(0, 0, 0, 0); right_layout.setSpacing(0)
-        property_title = QLabel("属性编辑器"); property_title.setStyleSheet(f"QLabel {{ background-color: {UI_COLORS['success']}; color: white; font-weight: bold; padding: 8px; margin: 0px; border: none; }}"); right_layout.addWidget(property_title)
-        self.property_editor = PropertyEditor(self); right_layout.addWidget(self.property_editor)
-        main_splitter.addWidget(left_splitter); main_splitter.addWidget(right_panel)
-        main_splitter.setStretchFactor(0, 3); main_splitter.setStretchFactor(1, 1)
+        # 创建标注表格
+        self.annotation_table = AnnotationTable()
+        annotation_layout.addWidget(self.annotation_table)
+        
+        # 组织左侧面板
+        left_splitter.addWidget(graphics_panel)
+        left_splitter.addWidget(annotation_panel)
+        left_splitter.setStretchFactor(0, 3)
+        left_splitter.setStretchFactor(1, 1)
+        
+        # 创建右侧面板
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+        
+        # 右侧面板标题
+        property_title = QLabel("属性编辑器")
+        property_title.setStyleSheet(f"QLabel {{ background-color: {UI_COLORS['success']}; color: white; font-weight: bold; padding: 8px; margin: 0px; border: none; }}")
+        right_layout.addWidget(property_title)
+        
+        # 创建属性编辑器
+        self.property_editor = PropertyEditor(self)
+        right_layout.addWidget(self.property_editor)
+        
+        # 组织主分割器
+        main_splitter.addWidget(left_splitter)
+        main_splitter.addWidget(right_panel)
+        main_splitter.setStretchFactor(0, 3)
+        main_splitter.setStretchFactor(1, 1)
 
         # 创建状态栏
         self.status_bar = self.statusBar()
@@ -151,6 +387,19 @@ class MainWindow(QMainWindow):
         
         # 为状态栏创建PDF导航控件
         self.setup_pdf_navigation_controls()
+        
+        # 设置菜单栏和工具栏
+        self.setup_menu_bar()
+        self.setup_toolbar()
+        self.setup_connections()
+        
+        # 设置加载对话框的大小
+        if hasattr(self, 'loading_dialog'):
+            self.loading_dialog.resize(self.size())
+            
+        # 确保创建完成后进行事件处理
+        QApplication.processEvents()
+        logger.debug("UI初始化完成")
         
     def setup_pdf_navigation_controls(self):
         """设置PDF导航控件（放在状态栏右侧）"""
@@ -223,6 +472,11 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addWidget(QLabel("PDF质量:")); self.pdf_quality_combo = QComboBox(); self.pdf_quality_combo.addItems(list(PDF_QUALITY_OPTIONS.keys())); self.pdf_quality_combo.setCurrentText("高清 (4x)"); self.pdf_quality_combo.setToolTip("渲染PDF时的清晰度，越高越清晰但加载越慢"); toolbar.addWidget(self.pdf_quality_combo)
         
+        # 添加强制分辨率复选框
+        self.force_resolution_checkbox = QCheckBox("强制原始分辨率")
+        self.force_resolution_checkbox.setToolTip("勾选后，将严格使用选定的PDF质量，即使可能导致内存占用过高。\n适合内存充足且需要最高清晰度的场景。")
+        toolbar.addWidget(self.force_resolution_checkbox)
+        
         toolbar.addSeparator()
         ai_recognize_action = QAction("AI识别", self); ai_recognize_action.triggered.connect(self.simulate_ai_recognition); toolbar.addAction(ai_recognize_action)
         self.area_select_action = QAction("区域OCR标注", self); self.area_select_action.setCheckable(True); self.area_select_action.setShortcut("Q"); self.area_select_action.setStatusTip("激活后，在图纸上拖拽鼠标以框选区域进行OCR识别"); self.area_select_action.toggled.connect(self.toggle_area_selection); toolbar.addAction(self.area_select_action)
@@ -249,11 +503,25 @@ class MainWindow(QMainWindow):
         # 调试信息
         print(f"滑块初始设置: 范围{BUBBLE_SIZE_MIN_PERCENT}-{BUBBLE_SIZE_MAX_PERCENT}, 步长{BUBBLE_SIZE_STEP}, 当前值{BUBBLE_SIZE_DEFAULT_PERCENT}")
         self.size_slider.setFixedWidth(120)  # 增加宽度，使滑块更容易拖动
-        # 显示比例而不是绝对值
+        
+        # 创建百分比输入框代替原来的标签
+        self.size_input = QLineEdit(f"{BUBBLE_SIZE_DEFAULT_PERCENT}")
+        self.size_input.setFixedWidth(40)
+        self.size_input.setAlignment(Qt.AlignCenter)
+        # 设置输入验证器，只允许输入数字
+        self.size_input.setValidator(QIntValidator(int(BUBBLE_SIZE_MIN_PERCENT), int(BUBBLE_SIZE_MAX_PERCENT)))
+        # 添加百分比符号标签
+        self.percent_label = QLabel("%")
+        
+        # 保留标签用于显示百分比（当使用滑块时）
         self.size_label = QLabel(f"{BUBBLE_SIZE_DEFAULT_PERCENT}%")
         self.size_label.setFixedWidth(40)
+        self.size_label.setVisible(False)  # 默认隐藏，因为我们现在使用输入框
+        
         toolbar.addWidget(self.size_slider)
-        toolbar.addWidget(self.size_label)
+        toolbar.addWidget(self.size_input)
+        toolbar.addWidget(self.percent_label)
+        toolbar.addWidget(self.size_label)  # 仍然添加但隐藏
         toolbar.addSeparator()
         self.color_button = QPushButton("颜色"); self.color_button.setToolTip("选择下一个标注的颜色，或修改当前选中标注的颜色"); self.color_button.clicked.connect(self.select_annotation_color); toolbar.addWidget(self.color_button)
         toolbar.addWidget(QLabel("形状:")); self.shape_combo = QComboBox(); self.shape_combo.addItems(["空心圆", "实心圆", "五角星", "三角形"]); toolbar.addWidget(self.shape_combo)
@@ -263,6 +531,8 @@ class MainWindow(QMainWindow):
         self.annotation_table.annotation_selected.connect(self.select_annotation_by_id)
         self.graphics_view.area_selected.connect(self.handle_area_selection)
         self.size_slider.valueChanged.connect(self.change_annotation_size)
+        self.size_slider.valueChanged.connect(self.sync_size_input_from_slider)  # 同步滑块值到输入框
+        self.size_input.editingFinished.connect(self.on_size_input_changed)  # 输入框编辑完成时更新气泡大小
         self.shape_combo.currentTextChanged.connect(self.change_current_annotation_shape)
         self.style_combo.currentTextChanged.connect(self.change_current_annotation_style)
         self.confidence_slider.valueChanged.connect(lambda v: self.confidence_label.setText(f"{v/100:.2f}"))
@@ -400,102 +670,156 @@ class MainWindow(QMainWindow):
             self.status_bar.showMessage("导出失败", 3000)
 
     def open_file(self):
-        file_dialog = QFileDialog(self); file_dialog.setNameFilter(FILE_DIALOG_FILTER)
+        """打开文件对话框选择文件"""
+        # 创建文件对话框并设置过滤器
+        file_dialog = QFileDialog(self)
+        file_dialog.setWindowTitle("打开文件")
+        file_dialog.setFileMode(QFileDialog.ExistingFile)
+        file_dialog.setNameFilter(FILE_DIALOG_FILTER)
+        
+        # 设置默认目录
+        if self.current_file_path:
+            dir_path = str(Path(self.current_file_path).parent)
+            file_dialog.setDirectory(dir_path)
+        
+        # 显示对话框
         if file_dialog.exec():
             file_paths = file_dialog.selectedFiles()
-            if file_paths: self.load_file(file_paths[0])
-    
+            if file_paths:
+                self.status_bar.showMessage(f"正在加载文件: {file_paths[0]}...")
+                self.load_file(file_paths[0])
+
     def load_file(self, file_path: str):
-        """加载文件"""
-        file_path_obj = Path(file_path); extension = file_path_obj.suffix.lower()
-        self.status_bar.showMessage(f"正在加载文件: {file_path_obj.name}...")
+        """加载文件
         
-        # 检查文件路径是否包含中文或特殊字符
-        has_non_ascii = any(ord(c) > 127 for c in file_path)
-        if has_non_ascii:
-            print(f"警告: 文件路径包含非ASCII字符，可能导致兼容性问题: {file_path}")
+        Args:
+            file_path: 文件路径
+        """
+        if not file_path or not Path(file_path).exists():
+            QMessageBox.warning(self, "错误", f"文件不存在: {file_path}")
+            self.status_bar.clearMessage()
+            return
+            
+        # 清除当前选中的标注
+        if self.current_annotation:
+            self.current_annotation = None
+            self.property_editor.set_annotation(None, None, None)
         
-        # 清除现有内容 - 重要：先清空self.annotations列表，再清场景
-        self.annotations = []  # 直接清空标注列表，避免引用已删除的对象
-        self.graphics_scene.clear()  # 清除场景会删除所有图形项
+        # 转换为Path对象以便于处理
+        file_path = Path(file_path)
+        extension = file_path.suffix.lower()
+        
+        # 确保扩展名有效
+        if extension not in SUPPORTED_IMAGE_FORMATS + SUPPORTED_PDF_FORMATS + SUPPORTED_DXF_FORMATS:
+            QMessageBox.warning(self, "错误", f"不支持的文件格式: {extension}")
+            self.status_bar.clearMessage()
+            return
+        
+        # 显示加载对话框
+        self.loading_label.setText(f"⏳ 正在加载文件...\n{file_path.name}")
+        self.loading_dialog.resize(self.size())
+        self.loading_dialog.show()
+        QApplication.processEvents()  # 确保UI立即更新
+        
+        # 清除当前状态
+        self.clear_annotations(show_empty_message=False)
+        self.annotation_table.clear_annotations()  # 确保表格也被清空
         self.clear_ocr_results()
-        self.clear_masked_regions()
-        self.current_pixmap = None
-        self.current_annotation = None
-        self.property_editor.set_annotation(None, None, None)
-        self.annotation_table.clear_annotations()
+        self.graphics_scene.clear()
         self.annotation_counter = 0  # 重置标注计数器
         
-        # 重置PDF相关属性
+        # 重置PDF相关状态
         self.pdf_file_path = None
         self.pdf_page_count = 0
         self.current_pdf_page = 0
         self.pdf_pages_cache.clear()
         self.annotations_by_page.clear()
         self.ocr_results_by_page.clear()
+        
+        # 隐藏PDF导航控件
         self.pdf_nav_widget.setVisible(False)
         
+        # 创建并启动文件加载线程
+        file_loader = FileLoaderWorker(
+            str(file_path),
+            pdf_quality=self.pdf_quality_combo.currentText()
+        )
+        
+        # 连接信号
+        file_loader.signals.progress.connect(self._on_file_load_progress)
+        file_loader.signals.finished.connect(self._on_file_loaded)
+        file_loader.signals.pdf_loaded.connect(self._on_pdf_file_loaded)
+        file_loader.signals.error.connect(self._on_file_load_error)
+        
+        # 启动线程
+        self.thread_pool.start(file_loader)
+
+    def _on_file_load_progress(self, progress: int, message: str):
+        """文件加载进度更新"""
+        self.loading_label.setText(f"⏳ {message}\n({progress}%)")
+        self.status_bar.showMessage(message)
+        QApplication.processEvents()
+
+    def _on_file_loaded(self, file_path: str, pixmap: QPixmap):
+        """文件加载完成回调
+        
+        Args:
+            file_path: 文件路径
+            pixmap: 图像数据
+        """
         try:
-            pixmap = None
-            if extension in SUPPORTED_IMAGE_FORMATS:
-                pixmap = FileLoader.load_image(str(file_path))
-                if pixmap: self.current_file_path = str(file_path)
-            elif extension in SUPPORTED_PDF_FORMATS:
-                # 获取PDF页数
-                page_count = FileLoader.get_pdf_page_count(str(file_path))
-                if page_count == 0:
-                    QMessageBox.warning(self, "错误", "无法读取PDF文件或PDF文件不包含任何页面")
-                    self.status_bar.clearMessage()
-                    return
-                
-                # 设置PDF相关属性
-                self.pdf_file_path = str(file_path)
-                self.pdf_page_count = page_count
-                self.current_pdf_page = 0  # 从第一页开始
-                
-                # 如果是多页PDF，显示导航控件
-                if page_count > 1:
-                    self.update_pdf_navigation_controls()
-                    
-                    # 显示提示消息
-                    QMessageBox.information(
-                        self, 
-                        "多页PDF", 
-                        f"检测到多页PDF文件，共 {page_count} 页。\n您可以使用右下角导航控件或键盘方向键切换页面。"
-                    )
-                
-                # 加载第一页
-                self.load_pdf_page(0)
-                return  # 已经完成加载，直接返回
-                
-            elif extension in SUPPORTED_DXF_FORMATS:
-                FileLoader.load_dxf(str(file_path), self.graphics_scene)
-                self.graphics_view.fitInView(self.graphics_scene.itemsBoundingRect(), Qt.KeepAspectRatio)
-                self.current_file_path = None
-                self.status_bar.showMessage(f"✅ DXF文件加载成功: {file_path_obj.name} (不支持OCR)", 5000)
-                QMessageBox.information(self, "提示", "DXF文件已加载，但不支持OCR文字识别功能")
-            else:
-                QMessageBox.warning(self, "错误", f"不支持的文件格式: {extension}")
-                self.status_bar.showMessage(f"❌ 不支持的文件格式: {extension}", 3000); return
+            self.current_file_path = file_path
+            self.current_pixmap = pixmap
             
-            if pixmap:
-                self.current_pixmap = pixmap
-                if extension not in SUPPORTED_PDF_FORMATS:  # PDF已经在load_pdf中添加到scene了
-                    self.graphics_scene.addPixmap(pixmap)
-                
-                # 确保图像居中显示
-                QTimer.singleShot(100, lambda: self.center_view())
-                
-                self.status_bar.showMessage(f"✅ 文件加载成功: {file_path_obj.name} ({pixmap.width()}x{pixmap.height()})", 5000)
-            elif self.current_file_path is None and extension not in SUPPORTED_DXF_FORMATS:
-                 QMessageBox.warning(self, "错误", "无法加载文件")
-                 self.status_bar.showMessage("❌ 文件加载失败", 3000)
+            # 清除当前场景
+            self.graphics_scene.clear()
             
-            self.ocr_button.setEnabled(self.current_file_path is not None)
+            # 添加图像到场景
+            self.graphics_scene.addPixmap(pixmap)
+            logger.debug(f"图像已添加到场景，尺寸: {pixmap.width()}x{pixmap.height()}")
+            
+            # 初始化标注ID计数器
+            self.annotation_counter = 0
+            
+            # 执行一次居中操作，之后不干扰用户缩放
+            self.center_view()
+            
+            # 更新状态栏
+            file_name = Path(file_path).name
+            self.status_bar.showMessage(f"已加载: {file_name} ({pixmap.width()}x{pixmap.height()})", 5000)
+            
+            # 隐藏加载对话框
+            self.loading_dialog.hide()
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"加载文件时发生错误: {str(e)}")
-            self.status_bar.showMessage(f"❌ 加载文件失败: {str(e)}", 5000)
-            self.current_file_path = None
+            self._on_file_load_error(f"处理加载结果时出错: {str(e)}")
+            logger.exception("图像加载完成处理错误")
+
+    def _on_pdf_file_loaded(self, file_path: str, page_count: int):
+        """PDF文件加载完成"""
+        try:
+            # 设置PDF相关属性
+            self.pdf_file_path = file_path
+            self.pdf_page_count = page_count
+            self.current_pdf_page = 0  # 从第一页开始
+            
+            # 如果是多页PDF，显示导航控件
+            if page_count > 1:
+                self.update_pdf_navigation_controls()
+                
+                # 在状态栏显示提示消息，而不是弹窗
+                self.status_bar.showMessage(f"多页PDF文件，共 {page_count} 页，使用右下角导航控件或键盘方向键切换页面", 5000)
+            
+            # 加载第一页
+            self.load_pdf_page(0)
+            
+        except Exception as e:
+            self._on_file_load_error(f"处理PDF文件时出错: {str(e)}")
+
+    def _on_file_load_error(self, error_msg: str):
+        """文件加载错误处理"""
+        QMessageBox.warning(self, "加载错误", error_msg)
+        self.status_bar.showMessage(f"❌ 文件加载失败: {error_msg}", 5000)
+        self.loading_dialog.hide()
 
     def simulate_ai_recognition(self):
         self.start_ocr_recognition()
@@ -646,7 +970,7 @@ class MainWindow(QMainWindow):
         bbox_item = QGraphicsPathItem(path)
         text_type = ocr_result.get('type', 'annotation')
         color = QColor(*OCR_TEXT_TYPE_COLORS.get(text_type, OCR_TEXT_TYPE_COLORS['annotation']))
-        color.setAlpha(80)  # 设置透明度
+        color.setAlpha(120)  # 设置透明度
         bbox_item.setPen(QPen(color, 2))
         bbox_item.setBrush(QBrush(color))
         
@@ -881,12 +1205,15 @@ class MainWindow(QMainWindow):
         shape_text = shape_map_rev.get(annotation.shape_type, "空心圆")
         self.shape_combo.blockSignals(True); self.shape_combo.setCurrentText(shape_text); self.shape_combo.blockSignals(False)
         
-        # 更新滑块为当前比例
+        # 更新滑块和输入框为当前比例
         self.size_slider.blockSignals(True)
+        self.size_input.blockSignals(True)
         scale_percent = int(annotation.scale_factor * 100)
         self.size_slider.setValue(scale_percent)
+        self.size_input.setText(str(scale_percent))
         self.size_label.setText(f"{scale_percent}%")
         self.size_slider.blockSignals(False)
+        self.size_input.blockSignals(False)
         
         self.update_color_button_display()
         
@@ -1028,11 +1355,54 @@ class MainWindow(QMainWindow):
         self.area_select_action.setChecked(False)
     
     def delete_annotation(self, annotation: BubbleAnnotationItem):
-        """删除标注"""
+        """删除标注，并同步删除关联的OCR结果和数据模型"""
         try:
+            annotation_id_to_delete = annotation.annotation_id
+
+            # 检查此标注是否有关联的OCR边界框
+            if hasattr(annotation, 'bbox_points') and annotation.bbox_points:
+                # 将QPointF列表转换为可比较的元组列表
+                bbox_to_find = [
+                    (round(p.x(), 2), round(p.y(), 2)) for p in annotation.bbox_points
+                ]
+                bbox_to_find.sort()
+
+                # 查找并删除匹配的OCR结果
+                ocr_result_to_remove = None
+                for ocr_result in self.ocr_results:
+                    if 'bbox' in ocr_result:
+                        # 将OCR结果的bbox也转换为标准格式进行比较
+                        current_bbox = [
+                            (round(p[0], 2), round(p[1], 2)) for p in ocr_result['bbox']
+                        ]
+                        current_bbox.sort()
+                        
+                        if bbox_to_find == current_bbox:
+                            ocr_result_to_remove = ocr_result
+                            break
+                
+                if ocr_result_to_remove:
+                    self.ocr_results.remove(ocr_result_to_remove)
+                    # 重新显示OCR结果以移除高亮框
+                    self.clear_ocr_display()
+                    self.display_ocr_results()
+                    self.update_ocr_stats()
+                    print(f"成功删除与标注 #{annotation_id_to_delete} 关联的OCR结果。")
+
+            # 从场景和当前活动列表中删除标注对象
             self.graphics_scene.removeItem(annotation)
             self.annotations.remove(annotation)
             
+            # --- 关键修复 ---
+            # 直接从数据模型 (self.annotations_by_page) 中移除该标注的数据
+            if self.pdf_file_path and self.current_pdf_page in self.annotations_by_page:
+                page_data = self.annotations_by_page[self.current_pdf_page]
+                # 寻找并删除具有相同ID的标注数据
+                self.annotations_by_page[self.current_pdf_page] = [
+                    ann_data for ann_data in page_data if ann_data.get('annotation_id') != annotation_id_to_delete
+                ]
+                print(f"已从第 {self.current_pdf_page + 1} 页的数据模型中删除标注 #{annotation_id_to_delete}")
+
             if self.current_annotation == annotation:
                 self.current_annotation = None
                 self.property_editor.set_annotation(None, None, None)
@@ -1040,11 +1410,7 @@ class MainWindow(QMainWindow):
             # 更新标注列表
             self.refresh_annotation_list()
             
-            # 如果是多页PDF模式，更新当前页的标注缓存
-            if self.pdf_file_path and self.current_pdf_page in range(self.pdf_page_count):
-                self.save_current_page_data()
-                
-            self.status_bar.showMessage(f"已删除标注 #{annotation.annotation_id}", 2000)
+            self.status_bar.showMessage(f"已删除标注 #{annotation_id_to_delete}", 2000)
         except Exception as e:
             print(f"删除标注时出错: {e}")
             self.status_bar.showMessage(f"删除标注失败: {str(e)}", 2000)
@@ -1160,7 +1526,12 @@ class MainWindow(QMainWindow):
             new_id += 1
         
         # 更新标注计数器
-        self.annotation_counter = max(self.annotation_counter, new_id - 1)
+        # 之前的逻辑 `self.annotation_counter = max(self.annotation_counter, new_id - 1)` 是错误的，
+        # 因为它不允许计数器在删除项目后减小。
+        # 正确的做法是，在重新编号后，将计数器设置为新的最大ID。
+        # 对于单页排序，这等于 new_id - 1。
+        # 对于多页连续排序，这也正确地设定了当前所有已知项中的最大ID。
+        self.annotation_counter = new_id - 1
         
         # 刷新标注列表
         self.refresh_annotation_list()
@@ -1198,73 +1569,71 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"已重新排序当前页面标注，起始编号: {start_id}，保持与前面页面的连续性", 3000)
         
     def _reorder_all_pdf_pages(self):
-        """全局重排序所有PDF页面"""
+        """全局重排序所有PDF页面【重构版】"""
         if not self.pdf_file_path:
             return
-            
-        # 保存当前页
-        current_page = self.current_pdf_page
-        
-        # 先保存当前页数据
+
+        # 1. 保存当前页的任何未保存的更改
         self.save_current_page_data()
-        
+        current_page_before_reorder = self.current_pdf_page
+
         try:
-            # 重新加载第一页，并从第一页开始排序
-            if current_page != 0:
-                self.load_pdf_page(0)
-                
-            # 强制从1开始编号所有标注
-            next_id = 1
+            # 2. 从数据模型中收集所有页面的所有标注数据
+            all_annotations_data = []
+            page_map = {} # 用于将标注数据映射回其原始页面
             
-            # 处理所有页面
             for page_idx in range(self.pdf_page_count):
-                # 确保我们加载了正确的页面
-                if page_idx != self.current_pdf_page:
-                    self.load_pdf_page(page_idx)
+                if page_idx in self.annotations_by_page:
+                    for ann_data in self.annotations_by_page[page_idx]:
+                        # 添加页面索引，以便后续识别
+                        ann_data['_page_idx'] = page_idx
+                        all_annotations_data.append(ann_data)
+
+            if not all_annotations_data:
+                QMessageBox.information(self, "提示", "所有页面都没有标注可重新排序。")
+                return
+
+            # 3. 对所有标注数据进行排序
+            # 排序规则：首先按页面索引，然后按Y坐标，最后按X坐标
+            sorted_data = sorted(
+                all_annotations_data,
+                key=lambda data: (data.get('_page_idx', 0), data.get('pos_y', 0), data.get('pos_x', 0))
+            )
+
+            # 4. 重新分配ID
+            next_id = 1
+            for ann_data in sorted_data:
+                old_id = ann_data['annotation_id']
+                ann_data['annotation_id'] = next_id
                 
-                # 如果当前页面有标注
-                if self.annotations:
-                    # 对当前页标注按照Y坐标（然后是X坐标）排序
-                    sorted_annotations = sorted(
-                        self.annotations,
-                        key=lambda ann: (ann.scenePos().y(), ann.scenePos().x())
-                    )
-                    
-                    # 重新分配ID
-                    for annotation in sorted_annotations:
-                        old_id = annotation.annotation_id
-                        annotation.annotation_id = next_id
-                        
-                        # 更新文本（如果文本中包含ID）
-                        if str(old_id) in annotation.text:
-                            annotation.text = annotation.text.replace(str(old_id), str(next_id))
-                            
-                        # 更新气泡显示
-                        annotation.update_annotation_id_display()
-                        
-                        next_id += 1
-                    
-                    # 保存更新后的数据
-                    self.save_current_page_data()
-                    
-                    # 刷新标注列表
-                    self.refresh_annotation_list()
-            
-            # 更新全局计数器
+                # 如果旧ID存在于文本中，也一并更新
+                if str(old_id) in ann_data['text']:
+                    ann_data['text'] = ann_data['text'].replace(str(old_id), str(next_id))
+                
+                next_id += 1
+
+            # 5. 将更新后的数据重新组织回按页码的字典结构中
+            self.annotations_by_page.clear()
+            for ann_data in sorted_data:
+                page_idx = ann_data.pop('_page_idx') # 移除临时页面索引
+                if page_idx not in self.annotations_by_page:
+                    self.annotations_by_page[page_idx] = []
+                self.annotations_by_page[page_idx].append(ann_data)
+
+            # 6. 更新全局标注计数器
             self.annotation_counter = next_id - 1
-            
-            # 返回到原始页面
-            if current_page != self.current_pdf_page:
-                self.load_pdf_page(current_page)
-                
-            QMessageBox.information(self, "全局重排序完成", f"已完成所有{self.pdf_page_count}页PDF的标注重排序，总标注数量: {next_id-1}")
-            
+
+            # 7. 重新加载用户之前所在的页面以显示更新
+            # load_pdf_page会处理场景清理和从新数据重建标注
+            self.load_pdf_page(current_page_before_reorder, skip_save=True)
+
+            QMessageBox.information(self, "全局重排序完成", f"已完成所有 {self.pdf_page_count} 页PDF的标注重排序，总标注数量: {next_id-1}")
+
         except Exception as e:
-            QMessageBox.warning(self, "重排序出错", f"全局重排序过程中出错: {str(e)}")
-            print(f"全局重排序出错: {e}")
-            # 确保返回原始页面
-            if current_page != self.current_pdf_page:
-                self.load_pdf_page(current_page)
+            logger.exception("全局重排序过程中发生严重错误")
+            QMessageBox.warning(self, "重排序出错", f"全局重排序过程中发生意外错误: {str(e)}\n\n建议重启程序。")
+            # 尝试恢复到原始页面
+            self.load_pdf_page(current_page_before_reorder, skip_save=True)
 
     def select_annotation_color(self):
         initial_color = QColor("blue")
@@ -1294,10 +1663,37 @@ class MainWindow(QMainWindow):
             self.next_annotation_color = None
 
     def on_annotation_size_changed(self, annotation: BubbleAnnotationItem):
-        if annotation == self.current_annotation: self.on_annotation_selected(annotation)
+        """当标注的大小发生变化时的回调
+        
+        当某个气泡的大小变化时，直接更新UI，但不触发更多气泡大小变化
+        """
+        # 获取当前气泡的比例因子
+        scale_factor = annotation.scale_factor
+        percent = int(scale_factor * 100)
+        
+        # 仅更新UI显示，不触发其他气泡的更新
+        self.size_slider.blockSignals(True)
+        self.size_slider.setValue(percent)
+        self.size_slider.blockSignals(False)
+        
+        # 同步更新输入框
+        self.size_input.blockSignals(True)
+        self.size_input.setText(str(percent))
+        self.size_input.blockSignals(False)
+        
+        # 更新标签文本
+        self.size_label.setText(f"{percent}%")
+        
+        # 保存为全局设置，但不应用到其他气泡
+        self.next_annotation_scale = scale_factor
+        self.next_annotation_size = -1
+        
+        # 仅刷新属性编辑器
+        if annotation == self.current_annotation:
+            self.property_editor.update_preview()
 
     def change_annotation_size(self, percent: int):
-        """更改注释大小（基于比例）
+        """更改所有注释的大小（基于全局统一设置）
         
         Args:
             percent: 大小比例，范围50-160（对应50%-160%）
@@ -1308,25 +1704,58 @@ class MainWindow(QMainWindow):
         # 显示百分比文本
         self.size_label.setText(f"{percent}%")
         
+        # 同步更新输入框（如果调用来源是滑块）
+        if self.sender() == self.size_slider:
+            self.size_input.blockSignals(True)
+            self.size_input.setText(str(percent))
+            self.size_input.blockSignals(False)
+        
         # 将百分比转换为比例因子，比如100%=1.0，50%=0.5
         scale_factor = percent / 100.0
         
+        # 保存为全局比例设置
+        self.next_annotation_scale = scale_factor
+        self.next_annotation_size = -1  # 标记为自动
+        
+        # 直接修改场景中的所有气泡
+        updated_count = 0
+        
+        # 禁用所有更新和重绘
+        self.graphics_scene.blockSignals(True)
+        
+        # 批量更新所有气泡的参数，但不触发信号和更新
+        for annotation in self.annotations:
+            try:
+                # 直接设置参数，不调用任何可能递归的方法
+                annotation.blockSignals(True)  # 阻止信号传播
+                annotation.scale_factor = scale_factor
+                annotation.auto_radius = True
+                annotation.base_radius = 20  # 统一使用固定基准半径
+                annotation.radius = max(int(annotation.base_radius * scale_factor), 10)
+                updated_count += 1
+            except Exception as e:
+                print(f"设置气泡参数时出错: {e}")
+        
+        # 批量处理完成后，解除信号阻塞并触发一次场景更新
+        for annotation in self.annotations:
+            try:
+                annotation.blockSignals(False)
+                annotation.prepareGeometryChange()
+            except Exception as e:
+                print(f"解除信号阻塞时出错: {e}")
+        
+        # 解除场景信号阻塞
+        self.graphics_scene.blockSignals(False)
+        
+        # 强制更新场景
+        self.graphics_scene.update()
+        
+        # 如果当前有选中的气泡，刷新属性编辑器
         if self.current_annotation:
-            print(f"应用比例 {scale_factor} 到当前选中的气泡 ID: {self.current_annotation.annotation_id}")
-            # 首先设置比例因子
-            self.current_annotation.scale_factor = scale_factor
-            # 确保auto_radius设置为True，这样才会使用比例因子
-            self.current_annotation.auto_radius = True
-            # 强制重新计算气泡尺寸并更新显示
-            self.current_annotation.change_size(-1)
-            # 刷新属性编辑器
             self.property_editor.update_preview()
-        else:
-            # 保存为下一个标注的默认比例
-            self.next_annotation_size = -1  # 标记为自动
-            self.next_annotation_scale = scale_factor
-            self.status_bar.showMessage(f"下一个标注的大小已设置为 {percent}%", 3000)
-    
+            
+        self.status_bar.showMessage(f"已更新 {updated_count} 个气泡的大小为 {percent}%", 3000)
+
     def clear_annotations(self, show_empty_message=True):
         """清除所有标注"""
         if not self.annotations:
@@ -1504,7 +1933,7 @@ class MainWindow(QMainWindow):
             lang_code, 
             [],  # 区域识别不需要屏蔽区域
             force_cpu=force_cpu,
-            cpu_threads=cpu_threads
+            cpu_threads=cpu_threads  # 传递线程数
         )
         
         # 连接信号
@@ -1746,99 +2175,166 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "错误", f"转换过程中发生错误: {str(e)}")
             self.status_bar.showMessage(f"❌ PDF转换错误: {str(e)}", 5000)
 
-    def load_pdf_page(self, page_index: int):
+    def load_pdf_page(self, page_index: int, skip_save: bool = False):
         """加载指定页码的PDF页面
         
         Args:
             page_index: 页码（从0开始）
+            skip_save: 是否跳过保存当前页数据的步骤。用于在执行了外部数据修改（如全局重排）后刷新视图。
             
         Returns:
-            bool: 是否成功加载
+            bool: 是否成功启动加载过程
         """
         if not self.pdf_file_path or page_index not in range(self.pdf_page_count):
             return False
-            
+        
+        start_time = time.time()
+        logger.debug(f"开始加载PDF页面 {page_index+1}/{self.pdf_page_count}")
+        
+        # 设置加载对话框文本并显示
+        self.loading_label.setText(f"⏳ 正在加载第 {page_index+1}/{self.pdf_page_count} 页...\n请稍候")
+        self.loading_dialog.resize(self.size())
+        # 非阻塞方式显示
+        self.loading_dialog.show()
+        QApplication.processEvents()  # 确保UI立即更新
+        logger.debug(f"显示加载对话框耗时: {time.time() - start_time:.2f}秒")
+        
         # 记录之前的页码，以便加载失败时可以恢复
-        previous_page = self.current_pdf_page
-            
+        self.previous_page = self.current_pdf_page
+        
         # 清除当前选择状态，防止引用已删除的对象
         self.graphics_scene.clearSelection()
         self.current_annotation = None
         self.property_editor.set_annotation(None, None, None)
-            
-        # 保存当前页面的标注和OCR结果
-        if self.current_pdf_page in range(self.pdf_page_count):
-            self.save_current_page_data()
-            
-        try:
-            # 更新当前页码
-            self.current_pdf_page = page_index
-            
-            # 更新导航按钮状态
-            self.update_pdf_navigation_controls()
+        logger.debug(f"清除当前选择状态耗时: {time.time() - start_time:.2f}秒")
+        
+        if not skip_save:
+            # 保存当前页面的标注和OCR结果
+            if self.current_pdf_page in range(self.pdf_page_count):
+                save_start = time.time()
+                self.save_current_page_data()
+                logger.debug(f"保存当前页面数据耗时: {time.time() - save_start:.2f}秒")
+        else:
+            logger.debug("跳过页面数据保存（按需刷新模式）")
+        
+        # 更新当前页码
+        self.current_pdf_page = page_index
+        
+        # 更新导航按钮状态
+        self.update_pdf_navigation_controls()
+        
+        # 检查是否已经缓存了该页面
+        if page_index in self.pdf_pages_cache:
+            temp_path = self.pdf_pages_cache[page_index]
+            # 检查临时文件是否仍然存在
+            if Path(temp_path).exists():
+                logger.debug(f"发现页面缓存: {temp_path}")
+                self.status_bar.showMessage(f"从缓存加载PDF页面 {page_index+1}/{self.pdf_page_count}...")
+                self.loading_label.setText(f"正在从缓存加载第 {page_index+1}/{self.pdf_page_count} 页...\n请稍候")
+                QApplication.processEvents()  # 确保UI立即更新
                 
-            # 检查是否已经缓存了该页面
-            if page_index in self.pdf_pages_cache:
-                temp_path = self.pdf_pages_cache[page_index]
-                # 检查临时文件是否仍然存在
-                if Path(temp_path).exists():
-                    self.status_bar.showMessage(f"从缓存加载PDF页面 {page_index+1}/{self.pdf_page_count}...")
-                    pixmap = QPixmap(temp_path)
-                    if not pixmap.isNull():
-                        # 清除当前场景
-                        self.graphics_scene.clear()
-                        self.graphics_scene.addPixmap(pixmap)
-                        self.current_pixmap = pixmap
-                        self.current_file_path = temp_path
-                        
-                        # 使用延迟调用确保图像居中显示
-                        QTimer.singleShot(100, self.center_view)
-                        
-                        self.restore_page_data(page_index)
-                        self.status_bar.showMessage(f"✅ 页面加载成功: {page_index+1}/{self.pdf_page_count}", 3000)
-                        return True
-            
-            # 缓存中没有或临时文件已被删除，重新转换
-            zoom_factor = PDF_QUALITY_OPTIONS.get(self.pdf_quality_combo.currentText(), 4.0)
-            self.status_bar.showMessage(f"正在转换PDF页面 {page_index+1}/{self.pdf_page_count}...")
-            
-            # 清除当前场景
-            self.graphics_scene.clear()
-            
-            # 转换PDF页面
-            pixmap, temp_path = FileLoader.load_pdf(
-                self.pdf_file_path, self.graphics_scene, page_index, quality=zoom_factor
-            )
-            
-            if pixmap and not pixmap.isNull() and temp_path:
-                # 缓存此页面
-                self.pdf_pages_cache[page_index] = temp_path
-                self.current_pixmap = pixmap
-                self.current_file_path = temp_path
+                # 在后台线程中加载缓存图像
+                def load_cached_image():
+                    try:
+                        cache_start = time.time()
+                        logger.debug(f"开始从缓存加载图像...")
+                        pixmap = QPixmap(temp_path)
+                        if not pixmap.isNull():
+                            logger.debug(f"缓存图像加载成功，耗时: {time.time() - cache_start:.2f}秒")
+                            # 在主线程中更新UI
+                            QApplication.instance().postEvent(self, LoadPDFEvent(pixmap, temp_path))
+                            return True
+                        else:
+                            logger.error(f"缓存图像加载失败: pixmap为空")
+                    except Exception as e:
+                        logger.exception(f"加载缓存图像出错: {e}")
+                        return False
                 
-                # 使用延迟调用确保图像居中显示
-                QTimer.singleShot(100, self.center_view)
-                
-                # 恢复此页面的数据
-                self.restore_page_data(page_index)
-                
-                self.status_bar.showMessage(f"✅ 页面加载成功: {page_index+1}/{self.pdf_page_count}", 3000)
+                # 创建线程并启动
+                thread = threading.Thread(target=load_cached_image)
+                thread.daemon = True
+                logger.debug(f"启动缓存图像加载线程")
+                thread.start()
                 return True
-            else:
-                # 加载失败，恢复到之前的页面
-                self.current_pdf_page = previous_page
-                self.update_pdf_navigation_controls()
-                self.status_bar.showMessage(f"❌ 页面 {page_index+1} 加载失败", 3000)
-                return False
-                
-        except Exception as e:
-            # 发生异常，恢复到之前的页面
-            self.current_pdf_page = previous_page
-            self.update_pdf_navigation_controls()
+        
+        # 缓存中没有或临时文件已被删除，重新转换
+        zoom_factor = PDF_QUALITY_OPTIONS.get(self.pdf_quality_combo.currentText(), 4.0)
+        logger.debug(f"未找到缓存，开始转换PDF，缩放因子: {zoom_factor}")
+        self.status_bar.showMessage(f"正在转换PDF页面 {page_index+1}/{self.pdf_page_count}...")
+        
+        # 更新加载提示
+        self.loading_label.setText(f"正在转换第 {page_index+1}/{self.pdf_page_count} 页...\n请稍候")
+        QApplication.processEvents()  # 确保UI立即更新
+        
+        # 清除当前场景
+        self.graphics_scene.clear()
+        
+        # 创建PDF加载工作线程
+        pdf_loader = PDFLoaderWorker(
+            self.pdf_file_path,
+            page_index,
+            quality=zoom_factor,
+            force_resolution=self.force_resolution_checkbox.isChecked()
+        )
+        
+        # 连接信号
+        pdf_loader.signals.finished.connect(self._on_pdf_loaded)
+        pdf_loader.signals.error.connect(self._on_pdf_load_error)
+        
+        # 启动线程
+        logger.debug(f"启动PDF加载线程，总准备耗时: {time.time() - start_time:.2f}秒")
+        self.thread_pool.start(pdf_loader)
+        
+        return True
+
+    def _on_pdf_loaded(self, pixmap: QPixmap, temp_path: str):
+        """PDF加载完成处理"""
+        try:
+            start_time = time.time()
+            logger.debug(f"PDF加载完成回调开始处理")
             
-            # 如果当前场景是空的，尝试恢复之前的页面内容
-            if len(self.graphics_scene.items()) == 0 and previous_page in self.pdf_pages_cache:
-                prev_temp_path = self.pdf_pages_cache[previous_page]
+            # 缓存此页面
+            self.pdf_pages_cache[self.current_pdf_page] = temp_path
+            self.current_pixmap = pixmap
+            self.current_file_path = temp_path
+            
+            # 清除并设置场景
+            self.graphics_scene.clear()
+            self.graphics_scene.addPixmap(pixmap)
+            logger.debug(f"更新场景耗时: {time.time() - start_time:.2f}秒")
+            
+            # 强制处理事件，确保场景已更新
+            QApplication.processEvents()
+            
+            # 仅在初始加载时执行一次居中操作
+            self.center_view()
+            
+            # 恢复此页面的数据
+            restore_start = time.time()
+            self.restore_page_data(self.current_pdf_page)
+            logger.debug(f"恢复页面数据耗时: {time.time() - restore_start:.2f}秒")
+            
+            self.status_bar.showMessage(f"✅ 页面加载成功: {self.current_pdf_page+1}/{self.pdf_page_count}", 3000)
+            
+            # 隐藏加载对话框
+            self.loading_dialog.hide()
+            logger.debug(f"PDF加载完成处理总耗时: {time.time() - start_time:.2f}秒")
+        except Exception as e:
+            logger.exception(f"PDF加载完成处理中发生异常: {str(e)}")
+            self._on_pdf_load_error(f"处理加载结果时出错: {str(e)}")
+
+    def _on_pdf_load_error(self, error_msg: str):
+        """PDF加载出错处理"""
+        logger.error(f"PDF加载错误: {error_msg}")
+        # 恢复到之前的页面
+        self.current_pdf_page = self.previous_page
+        self.update_pdf_navigation_controls()
+        
+        # 如果当前场景是空的，尝试恢复之前的页面内容
+        if len(self.graphics_scene.items()) == 0 and self.previous_page in self.pdf_pages_cache:
+            try:
+                logger.debug(f"尝试恢复到之前的页面: {self.previous_page+1}")
+                prev_temp_path = self.pdf_pages_cache[self.previous_page]
                 if Path(prev_temp_path).exists():
                     try:
                         prev_pixmap = QPixmap(prev_temp_path)
@@ -1846,16 +2342,22 @@ class MainWindow(QMainWindow):
                         self.current_pixmap = prev_pixmap
                         self.current_file_path = prev_temp_path
                         
-                        # 使用延迟调用确保图像居中显示
-                        QTimer.singleShot(100, self.center_view)
+                        # 直接居中显示，不使用延迟
+                        self.graphics_view.centerContent()
                         
-                        self.restore_page_data(previous_page)
-                    except:
+                        self.restore_page_data(self.previous_page)
+                        logger.debug(f"成功恢复到之前的页面")
+                    except Exception as e:
+                        logger.exception(f"恢复之前页面时出错: {str(e)}")
                         pass  # 如果恢复失败，至少保持当前状态
-            
-            QMessageBox.warning(self, "错误", f"加载PDF页面失败: {str(e)}")
-            self.status_bar.showMessage(f"❌ 页面加载失败: {str(e)}", 3000)
-            return False
+            except Exception as e:
+                logger.exception(f"尝试恢复之前页面时出错: {str(e)}")
+        
+        QMessageBox.warning(self, "错误", f"加载PDF页面失败: {error_msg}")
+        self.status_bar.showMessage(f"❌ 页面加载失败: {error_msg}", 3000)
+        
+        # 隐藏加载对话框
+        self.loading_dialog.hide()
 
     def update_pdf_navigation_controls(self):
         """更新PDF导航控件的状态"""
@@ -2116,17 +2618,78 @@ class MainWindow(QMainWindow):
 
     def center_view(self):
         """确保图像在视图中居中显示"""
-        if self.graphics_scene.items():
-            # 计算场景中所有项目的边界矩形
-            rect = self.graphics_scene.itemsBoundingRect()
-            # 确保矩形有效
-            if not rect.isEmpty():
-                # 调整视图以适应并居中显示场景内容
-                self.graphics_view.fitInView(rect, Qt.KeepAspectRatio)
-                print("已将图像居中显示")
+        if not self.graphics_scene.items():
+            return
+            
+        logger.debug("开始执行center_view()方法")
+        
+        # 直接调用一次centerContent，不使用任何定时器或延迟
+        self.graphics_view.centerContent()
+        
+        # 强制处理所有待处理事件，确保界面更新
+        QApplication.processEvents()
+        
+        logger.debug("center_view()方法执行完成")
+
+    def event(self, event):
+        """处理自定义事件"""
+        if event.type() == LoadPDFEvent.EVENT_TYPE:
+            # 处理PDF加载事件
+            try:
+                logger.debug(f"接收到PDF加载事件")
+                pixmap = event.pixmap
+                temp_path = event.temp_path
+                
+                # 清除并设置场景
+                self.graphics_scene.clear()
+                self.graphics_scene.addPixmap(pixmap)
+                self.current_pixmap = pixmap
+                self.current_file_path = temp_path
+                
+                # 强制处理事件，确保场景已更新
+                QApplication.processEvents()
+                
+                # 仅在初始加载时执行一次居中操作，不重复居中或使用定时器
+                self.graphics_view.centerContent()
+                
+                # 恢复此页面的数据
+                self.restore_page_data(self.current_pdf_page)
+                
+                self.status_bar.showMessage(f"✅ 页面加载成功: {self.current_pdf_page+1}/{self.pdf_page_count}", 3000)
+                
+                # 隐藏加载对话框
+                self.loading_dialog.hide()
+                
+                logger.debug(f"PDF加载事件处理完成")
+                return True
+            except Exception as e:
+                logger.exception(f"处理PDF加载事件时出错: {str(e)}")
+        
+        return super().event(event)
     
     def resizeEvent(self, event):
         """窗口大小调整时重新居中图像"""
         super().resizeEvent(event)
-        # 使用延迟调用，确保在UI更新后执行
-        QTimer.singleShot(100, self.center_view)
+        
+        # 调整loading对话框大小
+        if hasattr(self, 'loading_dialog'):
+            self.loading_dialog.resize(self.size())
+            
+        # 如果没有图像，则不需要居中
+        if not self.graphics_scene.items():
+            return
+        
+        # 不再在每次调整窗口大小时都重置缩放，因为这会干扰用户的缩放操作
+        logger.debug("窗口大小已改变，但不自动重置缩放以避免干扰用户操作")
+
+    def sync_size_input_from_slider(self):
+        """同步滑块值到输入框"""
+        self.size_input.setText(str(self.size_slider.value()))
+
+    def on_size_input_changed(self):
+        """输入框编辑完成时更新气泡大小"""
+        try:
+            new_size = int(self.size_input.text())
+            self.size_slider.setValue(new_size)
+        except ValueError:
+            QMessageBox.warning(self, "输入错误", "请输入有效的数字。")

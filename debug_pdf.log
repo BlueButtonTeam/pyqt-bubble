@@ -1,0 +1,2 @@
+2025-07-03 18:51:07,882 - PyQtBubble.FileLoader - WARNING - 原始缩放因子 4.0 可能导致图像过大(490.4MB)，自动调整为 2.74
+2025-07-03 18:51:12,463 - PyQtBubble.FileLoader - WARNING - 图像过大(230.44MB)，跳过优化处理

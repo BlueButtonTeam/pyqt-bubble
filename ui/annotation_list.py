@@ -52,25 +52,32 @@ class AnnotationTable(QTableWidget):
         
         self.setStyleSheet("""
             QTableWidget {
-                background-color: #ffffff;
-                border: 1px solid #dee2e6;
-                border-radius: 3px;
-                font-size: 12px;
-                gridline-color: #e9ecef;
+                background-color: #ffffff; /* 主背景色改为纯白 */
+                border: 1px solid #d3d3d3; /* 更柔和的边框 */
+                border-radius: 4px;
+                font-size: 13px; /* 字体稍大一点 */
+                gridline-color: #e8e8e8; /* 网格线颜色 */
+                color: #333333; /* 默认字体颜色 */
             }
             QHeaderView::section {
-                background-color: #f8f9fa;
-                padding: 4px;
-                border: 1px solid #dee2e6;
+                background-color: #4a69bd; /* 统一、清晰的蓝色表头 */
+                padding: 6px;
+                border: none; /* 移除表头边框 */
+                border-bottom: 1px solid #d3d3d3;
                 font-weight: bold;
-                color: #495057;
+                color: white; /* 表头文字改为白色 */
             }
             QTableWidget::item {
-                padding-left: 5px;
+                padding-left: 8px; /* 增加内边距 */
+                border: none; /* 移除单元格边框 */
+                border-bottom: 1px solid #e8e8e8; /* 只保留底部边框 */
             }
             QTableWidget::item:selected {
-                background-color: #e7f3ff;
-                color: #005cbf;
+                background-color: #0078d7; /* 清晰的蓝色选中背景 */
+                color: #ffffff; /* 选中时文字为白色 */
+            }
+            QTableWidget {
+                alternate-background-color: #f5faff; /* 淡蓝色交替行背景 */
             }
         """)
 

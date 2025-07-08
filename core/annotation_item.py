@@ -122,19 +122,32 @@ class BubbleAnnotationItem(QGraphicsObject):
         return styles.get(self.style, styles["default"])
 
     def _update_geometry(self):
-        # 检查是否有边界框信息，如果有且开启了自动半径，自动计算气泡半径为短边的一半
-        if self.auto_radius:
-            self._calculate_radius_from_bbox()
+        # 防止在_is_updating_size状态下重新计算半径
+        is_being_updated = getattr(self, '_is_updating_size', False)
+        
+        # 只有当不在更新状态且启用了自动半径时，才重新计算半径
+        # 这可以防止递归调用
+        if not is_being_updated and self.auto_radius:
+            # 直接计算半径，而不是调用_calculate_radius_from_bbox方法
+            if not hasattr(self, 'base_radius'):
+                self.base_radius = 20  # 默认基础半径
+            if not hasattr(self, 'scale_factor'):
+                self.scale_factor = 1.0
+            self.radius = max(int(self.base_radius * self.scale_factor), 10)
+        
+        # 确保考虑文本大小的影响，尤其是当文本可能比气泡大时
+        # 文本大小是气泡半径的1.2倍，确保气泡的绘制半径足够大
+        actual_drawing_radius = self.radius
             
         path = QPainterPath()
         if self.shape_type in ["circle", "solid_circle"]:
-            path.addEllipse(QPointF(0, 0), self.radius, self.radius)
+            path.addEllipse(QPointF(0, 0), actual_drawing_radius, actual_drawing_radius)
         elif self.shape_type == "pentagram":
             path.addPolygon(self._create_star_polygon())
         elif self.shape_type == "triangle":
             path.addPolygon(self._create_triangle_polygon())
         else: # 默认圆形
-            path.addEllipse(QPointF(0, 0), self.radius, self.radius)
+            path.addEllipse(QPointF(0, 0), actual_drawing_radius, actual_drawing_radius)
 
         bubble_center_local = QPointF(0, 0)
         anchor_local = self.mapFromScene(self.anchor_point)
@@ -142,9 +155,9 @@ class BubbleAnnotationItem(QGraphicsObject):
         line_vector = target_point - bubble_center_local
         distance = math.hypot(line_vector.x(), line_vector.y())
 
-        if distance > self.radius:
+        if distance > actual_drawing_radius:
             line_path = QPainterPath()
-            start_point = bubble_center_local + line_vector * (self.radius / distance)
+            start_point = bubble_center_local + line_vector * (actual_drawing_radius / distance)
             line_path.moveTo(start_point)
             line_path.lineTo(target_point)
             
@@ -153,40 +166,49 @@ class BubbleAnnotationItem(QGraphicsObject):
             path.addPath(stroker.createStroke(line_path))
         
         self._cached_shape_path = path
+        
+        # 强制更新
+        self.prepareGeometryChange()
 
     def _calculate_radius_from_bbox(self):
-        """从边界框计算气泡半径"""
-        if self.bbox_points and len(self.bbox_points) >= 4:
-            # 计算边界框的宽度和高度
-            x_values = [p.x() for p in self.bbox_points]
-            y_values = [p.y() for p in self.bbox_points]
+        """计算气泡半径，使用统一的基础大小值"""
+        # 使用统一的基础半径，不再依赖于各个边界框的尺寸
+        # 这将确保所有气泡具有相同的基础大小
+        
+        # 设置统一的基础半径值
+        self.base_radius = 20  # 默认基础半径
+        
+        # 应用当前的大小比例 (确保使用当前设置的scale_factor)
+        if not hasattr(self, 'scale_factor'):
+            self.scale_factor = 1.0
             
-            width = max(x_values) - min(x_values)
-            height = max(y_values) - min(y_values)
-            
-            # 获取短边长度
-            short_side = min(width, height)
-            
-            # 设置直径为短边长度（即半径为短边长度的一半）
-            # 注意：在圆形中，radius是半径，直径=2*半径
-            self.base_radius = max(int(short_side / 2), 10)  # 最小半径为10
-            
-            # 应用当前的大小比例 (确保使用当前设置的scale_factor)
-            if not hasattr(self, 'scale_factor'):
-                self.scale_factor = 1.0
-                
-            # 调试信息
-            print(f"计算气泡 {self.annotation_id} 半径: 短边={short_side}, 基准半径={self.base_radius}, 比例因子={self.scale_factor}")
-            
-            # 计算实际半径并设置
-            self.radius = max(int(self.base_radius * self.scale_factor), 10)
-            print(f"  -> 最终半径: {self.radius}, 气泡直径: {self.radius*2}")
+        # 调试信息
+        print(f"设置气泡 {self.annotation_id} 基准半径: {self.base_radius}, 比例因子: {self.scale_factor}")
+        
+        # 计算实际半径并设置
+        self.radius = max(int(self.base_radius * self.scale_factor), 10)
+        print(f"  -> 最终半径: {self.radius}, 气泡直径: {self.radius*2}")
 
     def shape(self) -> QPainterPath:
         return self._cached_shape_path
 
     def boundingRect(self) -> QRectF:
-        return self._cached_shape_path.controlPointRect()
+        # 获取基本图形路径的边界矩形
+        base_rect = self._cached_shape_path.controlPointRect()
+        
+        # 考虑到文本大小可能超出基本图形，扩展边界矩形
+        # 文本大小是气泡半径的1.2倍，我们在各个方向多预留20%的空间
+        text_margin = self.radius * 0.4  # 提供比实际字体大小更多的边距
+        
+        # 扩展矩形的各个方向
+        expanded_rect = QRectF(
+            base_rect.left() - text_margin,
+            base_rect.top() - text_margin,
+            base_rect.width() + text_margin * 2,
+            base_rect.height() + text_margin * 2
+        )
+        
+        return expanded_rect
 
     def paint(self, painter: QPainter, option, widget=None):
         painter.setRenderHint(QPainter.Antialiasing, True)
@@ -230,12 +252,25 @@ class BubbleAnnotationItem(QGraphicsObject):
         else:
             painter.drawEllipse(bubble_center_local, self.radius, self.radius)
 
+        # 文本绘制部分
         painter.setPen(QPen(QColor(0, 0, 0)))
-        # 增加字体大小为气泡半径的1.2倍，使数字更加醒目
-        font_size = max(int(self.radius * 1.2), 10)
-        font = QFont("Arial", font_size, QFont.ExtraBold)  # 使用更粗的字体
+        
+        # 调整字体大小，确保适合气泡大小
+        # 原来设置为气泡半径的1.2倍，现在适当调整为气泡半径的1.0倍，以确保文字完全在气泡内
+        font_size = max(int(self.radius * 1.0), 10)
+        font = QFont("Arial", font_size, QFont.ExtraBold)  # 使用粗体
         painter.setFont(font)
-        text_rect = QRectF(-self.radius, -self.radius, self.radius * 2, self.radius * 2)
+        
+        # 创建一个比气泡稍小的矩形，确保文本在气泡内
+        # 使用气泡直径的80%作为文本区域，这样可以保留一些边距
+        text_rect_size = self.radius * 1.6  # 稍小于气泡直径
+        text_rect = QRectF(
+            -text_rect_size/2, 
+            -text_rect_size/2, 
+            text_rect_size, 
+            text_rect_size
+        )
+        
         painter.drawText(text_rect, Qt.AlignCenter, str(self.annotation_id))
 
     def _get_target_point(self, anchor_point: QPointF) -> QPointF:
@@ -368,43 +403,49 @@ class BubbleAnnotationItem(QGraphicsObject):
         # 调试信息
         print(f"气泡 {self.annotation_id} 调整大小: {new_size}, 自动模式: {self.auto_radius}, 当前比例: {self.scale_factor}")
         
-        if new_size == -1:  # 自动大小
-            self.auto_radius = True
-            # 使用传入的scale_factor，不覆盖它
-            # 强制重新计算半径
-            self._calculate_radius_from_bbox()
-            print(f"  -> 自动模式计算新半径: {self.radius}，基准半径: {self.base_radius}")
-        else:
-            # 对于非自动大小，使用比例因子
-            self.auto_radius = False
+        # 防止递归调用
+        is_being_updated = getattr(self, '_is_updating_size', False)
+        if is_being_updated:
+            print(f"  -> 防止递归: 气泡 {self.annotation_id} 已在更新中")
+            return
             
-            # 新的比例因子计算方式：使用相对比例
-            if new_size <= 10:  # 极小
-                self.scale_factor = 0.5
-            elif new_size <= 15:  # 小
-                self.scale_factor = 0.7
-            elif new_size <= 20:  # 中
-                self.scale_factor = 1.0
-            elif new_size <= 25:  # 大
-                self.scale_factor = 1.3
-            else:  # 特大
-                self.scale_factor = 1.6
-            
-            # 如果有边界框，基于边界框计算
-            if self.bbox_points and len(self.bbox_points) >= 4:
-                self._calculate_radius_from_bbox()
-                print(f"  -> 非自动模式计算新半径: {self.radius}，基准半径: {self.base_radius}")
+        self._is_updating_size = True
+        
+        try:
+            if new_size == -1:  # 自动大小
+                self.auto_radius = True
+                # 直接计算半径，而不是调用可能导致递归的方法
+                self.radius = max(int(self.base_radius * self.scale_factor), 10)
+                print(f"  -> 自动模式设置新半径: {self.radius}，基准半径: {self.base_radius}")
             else:
-                # 没有边界框时使用默认值
-                self.radius = int(15 * self.scale_factor)  # 15是默认基准值
-                print(f"  -> 无边界框，使用默认值: {self.radius}")
+                # 对于非自动大小，使用比例因子
+                self.auto_radius = False
+                
+                # 新的比例因子计算方式：使用相对比例
+                if new_size <= 10:  # 极小
+                    self.scale_factor = 0.5
+                elif new_size <= 15:  # 小
+                    self.scale_factor = 0.7
+                elif new_size <= 20:  # 中
+                    self.scale_factor = 1.0
+                elif new_size <= 25:  # 大
+                    self.scale_factor = 1.3
+                else:  # 特大
+                    self.scale_factor = 1.6
+                
+                # 直接计算半径，而不是调用方法
+                self.radius = max(int(self.base_radius * self.scale_factor), 10)
+                print(f"  -> 非自动模式设置新半径: {self.radius}")
             
-        # 强制更新几何形状并重绘
-        self.prepareGeometryChange()
-        self._update_geometry()
-        self.update()
-        # 发送大小变化信号
-        self.size_change_requested.emit(self)
+            # 强制更新几何形状并重绘
+            self.prepareGeometryChange()
+            self._update_geometry()
+            self.update()
+            # 发送大小变化信号
+            self.size_change_requested.emit(self)
+        finally:
+            # 确保标志被重置，即使发生异常
+            self._is_updating_size = False
 
     def change_color(self, new_color: QColor):
         self.custom_color = new_color
@@ -448,9 +489,15 @@ class BubbleAnnotationItem(QGraphicsObject):
         """设置边界框的各个点坐标"""
         self.bbox_points = points
         
-        # 如果启用了自动大小，则重新计算半径
-        if self.auto_radius:
-            self._calculate_radius_from_bbox()
+        # 防止递归调用
+        is_being_updated = getattr(self, '_is_updating_size', False)
+        if not is_being_updated and self.auto_radius:
+            # 直接计算半径，而不是调用_calculate_radius_from_bbox方法
+            if not hasattr(self, 'base_radius'):
+                self.base_radius = 20  # 默认基础半径
+            if not hasattr(self, 'scale_factor'):
+                self.scale_factor = 1.0
+            self.radius = max(int(self.base_radius * self.scale_factor), 10)
             
         self.prepareGeometryChange()
         self._update_geometry()
