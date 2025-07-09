@@ -857,13 +857,14 @@ class MainWindow(QMainWindow):
         # 获取屏蔽区域数据
         masked_regions_data = [{'x': r.x(), 'y': r.y(), 'width': r.width(), 'height': r.height()} for r in self.masked_regions]
         
-        # 创建OCR工作器
+        # 创建OCR工作器，启用模型复用功能
         self.ocr_worker = PaddleOCRWorker(
             self.current_file_path, 
             lang_code, 
             masked_regions_data,
             force_cpu=force_cpu,
-            cpu_threads=cpu_threads  # 传递线程数
+            cpu_threads=cpu_threads,  # 传递线程数
+            reuse_model=True  # 启用模型复用，提高OCR效率
         )
         
         # 连接信号
@@ -1893,6 +1894,9 @@ class MainWindow(QMainWindow):
         if not self.current_pixmap:
             QMessageBox.information(self, "提示", "请先打开图片文件。")
             return
+        
+        # 默认直接使用直接识别模式，不显示弹窗询问
+        direct_recognition = True
             
         # 从当前图像中截取选定区域
         x, y, width, height = rect.x(), rect.y(), rect.width(), rect.height()
@@ -1903,6 +1907,41 @@ class MainWindow(QMainWindow):
         width = min(int(width), self.current_pixmap.width() - x)
         height = min(int(height), self.current_pixmap.height() - y)
         
+        # 【新增优化】：如果已有OCR结果，检查是否有位于选定区域内的结果
+        # 直接识别模式不重用已有结果
+        if self.ocr_results and not direct_recognition:
+            # 创建选定区域的QRectF对象
+            selected_rect = QRectF(x, y, width, height)
+            
+            # 查找位于选定区域内的OCR结果
+            overlapping_results = []
+            for result in self.ocr_results:
+                if 'bbox' in result:
+                    bbox = result['bbox']
+                    if len(bbox) >= 4:
+                        # 计算OCR框的边界矩形
+                        x_coords = [point[0] for point in bbox]
+                        y_coords = [point[1] for point in bbox]
+                        x_min = min(x_coords)
+                        y_min = min(y_coords)
+                        x_max = max(x_coords)
+                        y_max = max(y_coords)
+                        bbox_rect = QRectF(x_min, y_min, x_max - x_min, y_max - y_min)
+                        
+                        # 检查是否与选定区域重叠
+                        if selected_rect.intersects(bbox_rect):
+                            # 创建结果副本，保留原始坐标
+                            result_copy = result.copy()
+                            overlapping_results.append(result_copy)
+            
+            # 如果有重叠的OCR结果，直接使用它们
+            if overlapping_results:
+                print(f"✅ 找到 {len(overlapping_results)} 个现有OCR结果在选定区域内，直接使用")
+                self.on_area_ocr_finished(overlapping_results, rect, "", 0, 0)
+                return
+            else:
+                print("❌ 选定区域内没有现有OCR结果，执行新的OCR识别")
+        
         # 创建临时文件保存选定区域
         import tempfile
         import os
@@ -1912,9 +1951,31 @@ class MainWindow(QMainWindow):
         
         # 截取并保存区域图像
         cropped_pixmap = self.current_pixmap.copy(x, y, width, height)
-        cropped_pixmap.save(temp_path)
         
-        self.status_bar.showMessage("正在对选中区域进行OCR识别...")
+        # 询问用户是否为竖排文本
+        rotation_choice = QMessageBox.question(
+            self, "文本方向", "选中区域是否为竖排文本？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        
+        # 用于识别的图像，可能会被旋转
+        ocr_pixmap = cropped_pixmap.copy()
+        is_vertical = False
+        
+        # 如果是竖排文本，旋转用于识别的图像副本
+        if rotation_choice == QMessageBox.Yes:
+            from PySide6.QtGui import QTransform
+            ocr_pixmap = ocr_pixmap.transformed(QTransform().rotate(90))
+            is_vertical = True
+            print("✅ 已旋转图像以适应竖排文本（仅用于识别）")
+        
+        # 保存处理后的图像用于OCR
+        ocr_pixmap.save(temp_path)
+        
+        if direct_recognition:
+            self.status_bar.showMessage("正在对选中区域进行直接OCR识别...")
+        else:
+            self.status_bar.showMessage("正在对选中区域进行OCR识别...")
         
         # 获取语言配置
         lang_text = self.language_combo.currentText()
@@ -1927,22 +1988,37 @@ class MainWindow(QMainWindow):
         # 获取CPU线程数
         cpu_threads = self.threads_spinbox.value()
         
-        # 创建区域OCR工作器
+        # 创建区域OCR工作器，启用模型复用功能
         self.area_ocr_worker = PaddleOCRWorker(
             temp_path, 
             lang_code, 
             [],  # 区域识别不需要屏蔽区域
             force_cpu=force_cpu,
-            cpu_threads=cpu_threads  # 传递线程数
+            cpu_threads=cpu_threads,  # 传递线程数
+            reuse_model=True,  # 启用模型复用，提高区域OCR效率
+            direct_recognition=direct_recognition  # 设置是否直接识别
         )
+        
+        # 设置竖排文本标记
+        if is_vertical:
+            self.area_ocr_worker.is_vertical_text = True
+        
+        # 保存原始选择区域信息，供结果处理使用
+        self.area_ocr_worker.original_rect = {
+            'x': x,
+            'y': y,
+            'width': width,
+            'height': height
+        }
         
         # 连接信号
         self.area_ocr_worker.signals.progress.connect(lambda p: self.progress_bar.setValue(p))
         self.area_ocr_worker.signals.error.connect(self.on_area_ocr_error)
         
         # 使用lambda捕获rect参数，传递给回调函数
+        # 传递额外的参数is_vertical，以便在结果处理时考虑旋转
         self.area_ocr_worker.signals.finished.connect(
-            lambda results: self.on_area_ocr_finished(results, rect, temp_path, x, y)
+            lambda results: self.on_area_ocr_finished(results, rect, temp_path, x, y, is_vertical)
         )
         
         # 显示进度条
@@ -1958,7 +2034,7 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "区域OCR识别错误", error_msg)
         self.area_select_action.setChecked(False)
     
-    def on_area_ocr_finished(self, results: List[dict], rect: QRectF, temp_path: str, offset_x: int, offset_y: int):
+    def on_area_ocr_finished(self, results: List[dict], rect: QRectF, temp_path: str, offset_x: int, offset_y: int, is_vertical: bool = False):
         """区域OCR完成处理"""
         self.progress_bar.setVisible(False)
         
@@ -1975,17 +2051,25 @@ class MainWindow(QMainWindow):
             self.area_select_action.setChecked(False)
             return
         
-        # 调整结果坐标（添加偏移量）
+        # 强制所有结果使用原始选择的区域边界框，保持UI一致性
+        original_rect = rect
+        
+        # 为每个结果设置与原始区域一致的边界框
         for result in results:
-            if 'bbox' in result:
-                adjusted_bbox = []
-                for point in result['bbox']:
-                    adjusted_bbox.append([point[0] + offset_x, point[1] + offset_y])
-                result['bbox'] = adjusted_bbox
+            # 使用原始选择框作为识别框
+            result['bbox'] = [
+                [original_rect.x(), original_rect.y()],  # 左上
+                [original_rect.x() + original_rect.width(), original_rect.y()],  # 右上
+                [original_rect.x() + original_rect.width(), original_rect.y() + original_rect.height()],  # 右下
+                [original_rect.x(), original_rect.y() + original_rect.height()]   # 左下
+            ]
             
-            if 'center_x' in result and 'center_y' in result:
-                result['center_x'] += offset_x
-                result['center_y'] += offset_y
+            # 设置中心点
+            result['center_x'] = original_rect.x() + original_rect.width() / 2
+            result['center_y'] = original_rect.y() + original_rect.height() / 2
+            
+            # 标记是否为竖排文本，以便后续处理
+            result['is_vertical'] = is_vertical
         
         # 创建底色显示区域 - 与全局OCR一样显示识别区域
         for i, result in enumerate(results):
@@ -2693,3 +2777,54 @@ class MainWindow(QMainWindow):
             self.size_slider.setValue(new_size)
         except ValueError:
             QMessageBox.warning(self, "输入错误", "请输入有效的数字。")
+
+    def _detect_text_orientation(self, pixmap):
+        """
+        自动检测图像中文本的方向（横排或竖排）
+        返回True表示检测为竖排文本，False表示横排文本
+        """
+        try:
+            # 将QPixmap转换为numpy数组进行处理
+            qimage = pixmap.toImage()
+            width, height = qimage.width(), qimage.height()
+            ptr = qimage.constBits()
+            ptr.setsize(height * width * 4)
+            
+            # 转换为灰度图像进行处理
+            import numpy as np
+            import cv2
+            
+            arr = np.array(ptr).reshape(height, width, 4)
+            gray = cv2.cvtColor(arr, cv2.COLOR_RGBA2GRAY)
+            
+            # 应用阈值处理，转换为二值图像
+            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            
+            # 计算水平和垂直投影
+            h_proj = np.sum(binary, axis=1)
+            v_proj = np.sum(binary, axis=0)
+            
+            # 计算投影的方差
+            h_var = np.var(h_proj)
+            v_var = np.var(v_proj)
+            
+            # 如果垂直投影的方差显著大于水平投影的方差，则可能是竖排文本
+            is_vertical = v_var > (h_var * 1.2)
+            
+            print(f"📊 文本方向分析: 水平方差={h_var:.2f}, 垂直方差={v_var:.2f}")
+            print(f"🔄 检测结果: {'竖排' if is_vertical else '横排'}文本")
+            
+            # 如果区域比例是明显的长条形，也可以辅助判断
+            aspect_ratio = width / height
+            if aspect_ratio < 0.5:  # 高度远大于宽度
+                is_vertical = is_vertical or True
+                print(f"📏 宽高比分析: {aspect_ratio:.2f} (细高区域，更可能是竖排文本)")
+            elif aspect_ratio > 2.0:  # 宽度远大于高度
+                is_vertical = False
+                print(f"📏 宽高比分析: {aspect_ratio:.2f} (扁平区域，更可能是横排文本)")
+                
+            return is_vertical
+        
+        except Exception as e:
+            print(f"⚠️ 自动检测文本方向出错: {e}")
+            return False  # 出错时默认为横排文本
