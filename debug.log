@@ -1,1 +1,3 @@
-2025-07-08 17:13:50,790 - OCR_Performance - INFO - 文件: 123.png, 尺寸: 3509x2480, 大小: 24.90MB, OCR识别时间: 93.27秒
+2025-07-09 17:02:11,830 - PyQtBubble.FileLoader - WARNING - 直接优化图像时出错: cannot identify image file <_io.BytesIO object at 0x00000271DAE10540>，将保存未优化的图像。
+2025-07-09 17:02:31,469 - OCR_Performance - INFO - 文件: tmp2k26049w.png, 尺寸: 164x91, 大小: 0.04MB, OCR识别时间: 0.28秒
+2025-07-09 17:02:38,450 - OCR_Performance - INFO - 文件: tmpl4_px5mq.png, 尺寸: 142x62, 大小: 0.03MB, OCR识别时间: 0.25秒
