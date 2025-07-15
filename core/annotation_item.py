@@ -2,6 +2,7 @@
 
 import math
 from typing import Optional
+import time # Added for debouncing
 
 from PySide6.QtWidgets import QGraphicsObject, QMenu, QColorDialog
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF
@@ -51,6 +52,7 @@ class BubbleAnnotationItem(QGraphicsObject):
         self.is_audited = is_audited
         self.bbox_points = []  # 存储边界框各点坐标
         self.auto_radius = False  # 自动计算半径标志
+        self.edge_attachment_ratio = 0.5  # 箭头在边框上的相对位置比例，默认在中点
         
         self.anchor_point = anchor_point
         self._is_highlighted = False
@@ -275,37 +277,51 @@ class BubbleAnnotationItem(QGraphicsObject):
 
     def _get_target_point(self, anchor_point: QPointF) -> QPointF:
         """根据设置获取箭头指向点的位置"""
-        # 如果有具体的边界框信息，使用实际边界框计算中心点位置
-        if self.bbox_points and len(self.bbox_points) >= 4:
-            # 计算边界框的中心点
-            sum_x = sum(p.x() for p in self.bbox_points)
-            sum_y = sum(p.y() for p in self.bbox_points)
-            center_x = sum_x / len(self.bbox_points)
-            center_y = sum_y / len(self.bbox_points)
+        try:
+            # 如果有具体的边界框信息，使用实际边界框计算指向点位置
+            if self.bbox_points and len(self.bbox_points) >= 4:
+                try:
+                    # 计算边界框的边缘
+                    left_x = min(p.x() for p in self.bbox_points)
+                    right_x = max(p.x() for p in self.bbox_points)
+                    top_y = min(p.y() for p in self.bbox_points)
+                    bottom_y = max(p.y() for p in self.bbox_points)
+                    
+                    # 获取气泡在场景中的位置
+                    bubble_scene_pos = self.scenePos()
+                    
+                    # 计算边界框中心点
+                    center_x = (left_x + right_x) / 2
+                    
+                    # 确保edge_attachment_ratio是有效值（在0-1之间）
+                    if not hasattr(self, 'edge_attachment_ratio') or self.edge_attachment_ratio is None:
+                        self.edge_attachment_ratio = 0.5
+                    else:
+                        # 确保值在0-1范围内
+                        self.edge_attachment_ratio = max(0.0, min(1.0, self.edge_attachment_ratio))
+                    
+                    # 计算目标点Y坐标（基于attachment_ratio）
+                    target_y = top_y + (bottom_y - top_y) * self.edge_attachment_ratio
+                    
+                    # 根据气泡和边界框中心的相对位置决定箭头指向左边还是右边
+                    if bubble_scene_pos.x() > center_x:
+                        # 气泡在文本右侧，箭头指向右边缘
+                        target_x = right_x
+                    else:
+                        # 气泡在文本左侧，箭头指向左边缘
+                        target_x = left_x
+                    
+                    # 映射边界框指向点到本地坐标
+                    return self.mapFromScene(QPointF(target_x, target_y))
+                except Exception as e:
+                    print(f"计算目标点时出错: {e}")
+                    return anchor_point
             
-            # 找到边界框的左边缘和右边缘
-            left_x = min(p.x() for p in self.bbox_points)
-            right_x = max(p.x() for p in self.bbox_points)
-            
-            # 标注气泡位置相对于边界框的位置
-            bubble_scene_pos = self.scenePos()
-            
-            # 当气泡在文本右侧时，箭头指向文本框右边缘附近
-            # 当气泡在文本左侧时，箭头指向文本框左边缘附近
-            # 根据气泡位置和文本位置的相对关系决定箭头指向
-            if bubble_scene_pos.x() > center_x:
-                # 气泡在文本右侧，箭头指向右边缘
-                target_x = right_x
-            else:
-                # 气泡在文本左侧，箭头指向左边缘
-                target_x = left_x
-                
-            # 映射边界框中心点到本地坐标
-            return self.mapFromScene(QPointF(target_x, center_y))
-        
-        # 当没有边界框信息时，直接返回锚点作为目标点
-        # 这样箭头会直接指向锚点位置
-        return anchor_point
+            # 当没有边界框信息时，直接返回锚点作为目标点
+            return anchor_point
+        except Exception as e:
+            print(f"获取目标点时出错: {e}")
+            return anchor_point
         
     def _draw_arrowhead(self, painter: QPainter, line_start: QPointF, line_end: QPointF):
         angle = math.atan2(-(line_start.y() - line_end.y()), line_start.x() - line_end.x())
@@ -482,23 +498,68 @@ class BubbleAnnotationItem(QGraphicsObject):
             'bbox_points': self.bbox_points, # <-- 添加边界框点信息
             'auto_radius': self.auto_radius, # <-- 添加自动半径标志
             'base_radius': self.base_radius, # <-- 添加基准半径
-            'scale_factor': self.scale_factor # <-- 添加缩放因子
+            'scale_factor': self.scale_factor, # <-- 添加缩放因子
+            'edge_attachment_ratio': self.edge_attachment_ratio # <-- 添加边框附着比例
         }
 
     def set_bbox_points(self, points: list):
         """设置边界框的各个点坐标"""
-        self.bbox_points = points
-        
-        # 防止递归调用
-        is_being_updated = getattr(self, '_is_updating_size', False)
-        if not is_being_updated and self.auto_radius:
-            # 直接计算半径，而不是调用_calculate_radius_from_bbox方法
-            if not hasattr(self, 'base_radius'):
-                self.base_radius = 20  # 默认基础半径
-            if not hasattr(self, 'scale_factor'):
-                self.scale_factor = 1.0
-            self.radius = max(int(self.base_radius * self.scale_factor), 10)
+        try:
+            # 添加防抖保护 - 避免过于频繁的更新
+            current_time = time.time()
+            last_update_time = getattr(self, '_last_bbox_update_time', 0)
+            if (current_time - last_update_time) * 1000 < 30:  # 30毫秒内不重复处理
+                return
+            self._last_bbox_update_time = current_time
             
-        self.prepareGeometryChange()
-        self._update_geometry()
-        self.update()
+            # 处理无效输入
+            if not points or len(points) < 4:
+                self.bbox_points = points
+                self.prepareGeometryChange()
+                self._update_geometry()
+                self.update()
+                return
+            
+            # 首次设置边界框点时，使用默认的attachment_ratio
+            if not self.bbox_points or len(self.bbox_points) < 4:
+                if not hasattr(self, 'edge_attachment_ratio') or self.edge_attachment_ratio is None:
+                    self.edge_attachment_ratio = 0.5
+                self.bbox_points = points
+                self.prepareGeometryChange()
+                self._update_geometry()
+                self.update()
+                return
+                
+            # 如果已经有bbox点，计算当前目标点在边上的位置比例
+            old_left_x = min(p.x() for p in self.bbox_points)
+            old_right_x = max(p.x() for p in self.bbox_points)
+            old_top_y = min(p.y() for p in self.bbox_points)
+            old_bottom_y = max(p.y() for p in self.bbox_points)
+            
+            # 气泡位置相对于文本框的位置
+            bubble_scene_pos = self.scenePos()
+            center_x = sum(p.x() for p in self.bbox_points) / len(self.bbox_points)
+            
+            # 确保edge_attachment_ratio存在
+            if not hasattr(self, 'edge_attachment_ratio') or self.edge_attachment_ratio is None:
+                self.edge_attachment_ratio = 0.5
+                
+            # 更新边界框点
+            self.bbox_points = points
+            
+            # 防止递归调用
+            is_being_updated = getattr(self, '_is_updating_size', False)
+            if not is_being_updated and self.auto_radius:
+                # 直接计算半径，而不是调用_calculate_radius_from_bbox方法
+                if not hasattr(self, 'base_radius') or self.base_radius is None:
+                    self.base_radius = 20  # 默认基础半径
+                if not hasattr(self, 'scale_factor') or self.scale_factor is None:
+                    self.scale_factor = 1.0
+                self.radius = max(int(self.base_radius * self.scale_factor), 10)
+                
+            self.prepareGeometryChange()
+            self._update_geometry()
+            self.update()
+        except Exception as e:
+            print(f"设置边界框点时出错: {e}")
+            # 确保在出错时不会崩溃

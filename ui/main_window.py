@@ -1,39 +1,58 @@
-# ui/main_window.py
+#!/usr/bin/env python3
+"""
+主窗口模块 - OCR识别和标注功能
+"""
 
-import sys
+import os
 import re
-import threading
-import time  # 导入time模块用于计时
-import logging  # 导入logging模块用于日志记录
-from pathlib import Path
-from typing import Optional, List, Dict, Tuple, Any, Union
+import sys
+import time
+import json
+import logging
+import math
+import random
+import tempfile
+import numpy as np
 from datetime import datetime
-
-# 配置日志记录
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('debug.log', 'w', 'utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger('PyQtBubble')
+from typing import List, Dict, Tuple, Set, Optional, Any, Union
+from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QGraphicsScene, QMenuBar, QToolBar, QFileDialog, QMessageBox, 
-    QPushButton, QComboBox, QProgressBar, QCheckBox, QSlider, QLabel, QColorDialog, QSpinBox,
-    QDialog, QListWidget, QListWidgetItem, QInputDialog, QLineEdit
+    QMainWindow, QGraphicsScene, QGraphicsPixmapItem, 
+    QFileDialog, QMessageBox, QLabel, QSlider, QWidget,
+    QVBoxLayout, QHBoxLayout, QGridLayout, QSplitter, QToolBar, 
+    QLineEdit, QPushButton, QCheckBox, QComboBox, QStatusBar,
+    QScrollArea, QGroupBox, QFrame, QFormLayout, QProgressBar,
+    QDialog, QApplication, QSizePolicy, QListWidget, QTableWidget,
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu,
+    QSpinBox, QListWidgetItem, QInputDialog
 )
-from PySide6.QtCore import Qt, QRectF, QPointF, QThreadPool, Signal, Slot, QSettings, QTimer, QObject, QRunnable, QEvent
+from PySide6.QtCore import (
+    Qt, QObject, QRunnable, Signal, QThreadPool, QTimer, 
+    QSize, QPoint, QPointF, QRectF, QRect, QEvent, QFile,
+    Slot, QSettings
+)
 from PySide6.QtGui import (
-    QPainter, QPixmap, QImage, QColor, QPen, QBrush, QPainterPath, 
-    QAction, QKeySequence, QIcon, QIntValidator
+    QPixmap, QImage, QColor, QPainter, QPen, QBrush, 
+    QFont, QFontMetrics, QKeySequence, QPainterPath, 
+    QTransform, QPalette, QIcon, QGuiApplication, QAction,
+    QIntValidator
 )
-from PySide6.QtWidgets import QApplication
+
+# 检查PaddleOCR是否可用
+try:
+    import paddle
+    HAS_OCR_SUPPORT = True
+except ImportError:
+    HAS_OCR_SUPPORT = False
 
 # 导入自定义模块
+from core.annotation_item import BubbleAnnotationItem
+from core.file_loader import FileLoader
+from ui.graphics_view import GraphicsView
+from ui.annotation_list import AnnotationTable
+from ui.property_editor import PropertyEditor
+
 from utils.constants import (
     APP_TITLE, FILE_DIALOG_FILTER, DEFAULT_WINDOW_SIZE, DEFAULT_WINDOW_POSITION,
     DEFAULT_OCR_LANGUAGES, PDF_QUALITY_OPTIONS, OCR_TEXT_TYPE_COLORS,
@@ -48,32 +67,27 @@ from utils.dependencies import HAS_OCR_SUPPORT, HAS_GPU_SUPPORT, HAS_PADDLE_OCR,
 # 只导入PaddleOCR工作器
 if HAS_PADDLE_OCR:
     from core.paddle_ocr_worker import PaddleOCRWorker
-from core.annotation_item import BubbleAnnotationItem
-from core.file_loader import FileLoader
 
-from ui.graphics_view import GraphicsView
-from ui.annotation_list import AnnotationTable
-from ui.property_editor import PropertyEditor
-
-# 移除OCR框项导入
-
+# 检查Excel支持
 try:
     import openpyxl
     from openpyxl.styles import Font, Alignment
+    from copy import copy
     import pandas as pd
     HAS_EXCEL_SUPPORT = True
 except ImportError:
     HAS_EXCEL_SUPPORT = False
 
-if HAS_OCR_SUPPORT:
-    import numpy as np
-
-# 导入我们的命令类
-# from core.undo_commands import (
-#     AddAnnotationCommand, DeleteAnnotationCommand, MoveAnnotationCommand,
-#     EditAnnotationTextCommand, EditAnnotationStyleCommand, EditAnnotationShapeCommand,
-#     EditAnnotationColorCommand, EditAnnotationSizeCommand, ClearAnnotationsCommand
-# )
+# 配置日志记录
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('debug.log', 'w', 'utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger('PyQtBubble')
 
 # 添加一个自定义事件类用于从线程传递加载结果到主线程
 class LoadPDFEvent(QEvent):
@@ -452,6 +466,7 @@ class MainWindow(QMainWindow):
         
         if HAS_EXCEL_SUPPORT:
             export_action = QAction("导出为Excel...", self); export_action.setShortcut("Ctrl+E"); export_action.triggered.connect(self.export_to_excel); file_menu.addAction(export_action)
+            export_template_action = QAction("导出到检验报告模板...", self); export_template_action.setShortcut("Ctrl+T"); export_template_action.triggered.connect(self.export_to_template); file_menu.addAction(export_template_action)
         file_menu.addSeparator()
         
         # --- 新增：创建全局快捷键动作 ---
@@ -468,6 +483,7 @@ class MainWindow(QMainWindow):
         open_action = QAction("打开文件", self); open_action.triggered.connect(self.open_file); toolbar.addAction(open_action)
         if HAS_EXCEL_SUPPORT:
             export_btn = QPushButton("导出Excel"); export_btn.setToolTip("将当前标注列表导出为Excel文件"); export_btn.clicked.connect(self.export_to_excel); toolbar.addWidget(export_btn)
+            export_template_btn = QPushButton("导出检验报告"); export_template_btn.setToolTip("将当前标注列表导出到检验报告模板"); export_template_btn.clicked.connect(self.export_to_template); toolbar.addWidget(export_template_btn)
         
         toolbar.addSeparator()
         toolbar.addWidget(QLabel("PDF质量:")); self.pdf_quality_combo = QComboBox(); self.pdf_quality_combo.addItems(list(PDF_QUALITY_OPTIONS.keys())); self.pdf_quality_combo.setCurrentText("高清 (4x)"); self.pdf_quality_combo.setToolTip("渲染PDF时的清晰度，越高越清晰但加载越慢"); toolbar.addWidget(self.pdf_quality_combo)
@@ -668,6 +684,251 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "导出失败", f"导出到Excel时发生错误:\n{e}")
             self.status_bar.showMessage("导出失败", 3000)
+            
+    def export_to_template(self):
+        """将标注列表导出到Excel模板中
+        - 将序号、类型、尺寸、上公差、下公差插入到A-E列
+        - 从第14行开始插入
+        """
+        try:
+            import xlwings as xw
+            HAS_XLWINGS_SUPPORT = True
+        except ImportError:
+            HAS_XLWINGS_SUPPORT = False
+            if not HAS_EXCEL_SUPPORT:
+                QMessageBox.warning(self, "功能缺失", "缺少Excel支持库。\n请运行: pip install xlwings 或 pip install openpyxl")
+                return
+        
+        if not self.annotations:
+            QMessageBox.information(self, "提示", "标注列表为空，无需导出。")
+            return
+        
+        # 默认使用根目录下的muban.xlsx
+        template_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "muban.xlsx")
+        if not os.path.exists(template_path):
+            # 如果默认模板不存在，则提示选择
+            template_path, _ = QFileDialog.getOpenFileName(self, "选择Excel模板文件", "", "Excel 文件 (*.xlsx)")
+            if not template_path:
+                return
+        
+        # 选择保存位置
+        default_filename = f"{Path(self.current_file_path).stem}_检验报告.xlsx" if self.current_file_path else "检验报告.xlsx"
+        save_path, _ = QFileDialog.getSaveFileName(self, "保存Excel文件", default_filename, "Excel 文件 (*.xlsx)")
+        if not save_path:
+            return
+        
+        try:
+            # 获取要插入的标注数据
+            annotations_data = []
+            for ann in self.annotations:
+                row_data = [
+                    str(ann.annotation_id),
+                    ann.dimension_type,
+                    ann.dimension,
+                    ann.upper_tolerance,
+                    ann.lower_tolerance
+                ]
+                annotations_data.append(row_data)
+            
+            # 排序标注（按ID排序）
+            annotations_data.sort(key=lambda x: int(x[0]) if x[0].isdigit() else float('inf'))
+            
+            # 确定插入行的范围
+            start_row = 14  # 从第14行开始
+            insert_count = len(annotations_data)  # 需要插入的行数
+            
+            if HAS_XLWINGS_SUPPORT:
+                # 使用xlwings插入行 (这种方式会更接近Excel手动操作)
+                try:
+                    # 先复制模板到保存位置
+                    import shutil
+                    shutil.copy2(template_path, save_path)
+                    
+                    # 用xlwings打开文件
+                    app = xw.App(visible=False)
+                    wb = app.books.open(save_path)
+                    ws = wb.sheets[0]
+                    
+                    # 插入行 - 这会像Excel手动操作一样插入干净的行
+                    # 注意xlwings中行号从1开始计数
+                    # 限制只在A-P列插入，不影响Q-S列
+                    ws.range(f"A{start_row}:P{start_row+insert_count-1}").insert('down')
+                    
+                    # 填充数据 (可选)
+                    for i, row_data in enumerate(annotations_data):
+                        row_idx = start_row + i
+                        # 只处理A-E列
+                        for j, value in enumerate(row_data):
+                            col_letter = chr(65 + j)  # A=65, B=66, ...
+                            ws.range(f"{col_letter}{row_idx}").value = value
+                        
+                        # 计算并填充O列和P列
+                        # O列=C+D（尺寸+上公差）
+                        dimension = row_data[2] if len(row_data) > 2 else ""
+                        upper_tol = row_data[3] if len(row_data) > 3 else ""
+                        lower_tol = row_data[4] if len(row_data) > 4 else ""
+                        
+                        # 尝试进行数值计算，如果是数字的话
+                        # O列=C+D（尺寸+上公差）
+                        try:
+                            # 尝试将尺寸和公差转换为浮点数进行计算
+                            if dimension and upper_tol:
+                                try:
+                                    dim_value = float(dimension)
+                                    # 处理公差值，去掉前面的+号
+                                    tol_value = float(upper_tol.replace('+', '')) if upper_tol.startswith('+') else float(upper_tol)
+                                    # 计算结果
+                                    result_value = dim_value + tol_value
+                                    # 设置单元格值为计算结果
+                                    ws.range(f"O{row_idx}").value = result_value
+                                except ValueError:
+                                    # 如果无法转换为数值，则留空
+                                    ws.range(f"O{row_idx}").value = ""
+                            else:
+                                ws.range(f"O{row_idx}").value = ""
+                        except Exception as e:
+                            print(f"计算O列时出错: {e}")
+                            ws.range(f"O{row_idx}").value = ""
+                        
+                        # P列=C+E（尺寸+下公差）
+                        try:
+                            # 尝试将尺寸和公差转换为浮点数进行计算
+                            if dimension and lower_tol:
+                                try:
+                                    dim_value = float(dimension)
+                                    # 处理公差值，去掉前面的+号
+                                    tol_value = float(lower_tol.replace('+', '')) if lower_tol.startswith('+') else float(lower_tol)
+                                    # 计算结果
+                                    result_value = dim_value + tol_value
+                                    # 设置单元格值为计算结果
+                                    ws.range(f"P{row_idx}").value = result_value
+                                except ValueError:
+                                    # 如果无法转换为数值，则留空
+                                    ws.range(f"P{row_idx}").value = ""
+                            else:
+                                ws.range(f"P{row_idx}").value = ""
+                        except Exception as e:
+                            print(f"计算P列时出错: {e}")
+                            ws.range(f"P{row_idx}").value = ""
+                    
+                    # 保存文件并关闭Excel
+                    wb.save()
+                    wb.close()
+                    app.quit()
+                    
+                    QMessageBox.information(self, "导出成功", f"标注列表已成功导出到:\n{save_path}")
+                    self.status_bar.showMessage(f"成功导出到 {Path(save_path).name}", 5000)
+                    return
+                except Exception as e:
+                    # 如果xlwings出错，回退到openpyxl
+                    QMessageBox.warning(self, "提示", f"使用xlwings导出失败 ({str(e)})，将尝试使用openpyxl。")
+            
+            # 如果没有xlwings支持或xlwings失败，使用openpyxl
+            if HAS_EXCEL_SUPPORT:
+                # 打开模板文件
+                wb = openpyxl.load_workbook(template_path)
+                ws = wb.active
+                
+                # 保存Q13-S30区域的内容
+                q_s_content = {}
+                for r in range(start_row, start_row + insert_count + 30):  # 保存足够多的行
+                    for c in range(17, 20):  # Q=17, R=18, S=19
+                        try:
+                            cell_coord = f"{openpyxl.utils.get_column_letter(c)}{r}"
+                            q_s_content[cell_coord] = ws[cell_coord].value
+                        except:
+                            continue
+                
+                # 插入行
+                ws.insert_rows(start_row, insert_count)
+                
+                # 检查并手动取消新插入行中的合并单元格
+                for r in range(start_row, start_row + insert_count):
+                    # 检查每个单元格是否是合并单元格的一部分
+                    for c in range(1, 17):  # A列到P列
+                        try:
+                            # 获取单元格坐标
+                            coord = f"{openpyxl.utils.get_column_letter(c)}{r}"
+                            
+                            # 检查该单元格是否是合并单元格的一部分
+                            for merged_range in list(ws.merged_cells.ranges):
+                                if coord in merged_range:
+                                    # 如果是合并单元格，解除合并
+                                    ws.unmerge_cells(str(merged_range))
+                                    break
+                        except:
+                            continue
+                
+                # 恢复Q-S列的内容
+                for cell_coord, value in q_s_content.items():
+                    ws[cell_coord] = value
+                
+                # 填充数据 (可选)
+                for i, row_data in enumerate(annotations_data):
+                    row_idx = start_row + i
+                    # 只处理A-E列的数据
+                    for j, value in enumerate(row_data):
+                        if j < len(row_data):  # 确保不越界
+                            ws.cell(row=row_idx, column=j+1).value = value
+                    
+                    # 计算并填充O列和P列
+                    # O列=C+D（尺寸+上公差）
+                    dimension = row_data[2] if len(row_data) > 2 else ""
+                    upper_tol = row_data[3] if len(row_data) > 3 else ""
+                    lower_tol = row_data[4] if len(row_data) > 4 else ""
+                    
+                    # 尝试进行数值计算，如果是数字的话
+                    # O列=C+D（尺寸+上公差）
+                    try:
+                        # 尝试将尺寸和公差转换为浮点数进行计算
+                        if dimension and upper_tol:
+                            try:
+                                dim_value = float(dimension)
+                                # 处理公差值，去掉前面的+号
+                                tol_value = float(upper_tol.replace('+', '')) if upper_tol.startswith('+') else float(upper_tol)
+                                # 计算结果
+                                result_value = dim_value + tol_value
+                                # 设置单元格值为计算结果
+                                ws.cell(row=row_idx, column=15).value = result_value  # O列是第15列
+                            except ValueError:
+                                # 如果无法转换为数值，则留空
+                                ws.cell(row=row_idx, column=15).value = ""
+                        else:
+                            ws.cell(row=row_idx, column=15).value = ""
+                    except Exception as e:
+                        print(f"计算O列时出错: {e}")
+                        ws.cell(row=row_idx, column=15).value = ""
+                    
+                    # P列=C+E（尺寸+下公差）
+                    try:
+                        # 尝试将尺寸和公差转换为浮点数进行计算
+                        if dimension and lower_tol:
+                            try:
+                                dim_value = float(dimension)
+                                # 处理公差值，去掉前面的+号
+                                tol_value = float(lower_tol.replace('+', '')) if lower_tol.startswith('+') else float(lower_tol)
+                                # 计算结果
+                                result_value = dim_value + tol_value
+                                # 设置单元格值为计算结果
+                                ws.cell(row=row_idx, column=16).value = result_value  # P列是第16列
+                            except ValueError:
+                                # 如果无法转换为数值，则留空
+                                ws.cell(row=row_idx, column=16).value = ""
+                        else:
+                            ws.cell(row=row_idx, column=16).value = ""
+                    except Exception as e:
+                        print(f"计算P列时出错: {e}")
+                        ws.cell(row=row_idx, column=16).value = ""
+                
+                # 保存文件
+                wb.save(save_path)
+                QMessageBox.information(self, "导出成功", f"标注列表已成功导出到:\n{save_path}")
+                self.status_bar.showMessage(f"成功导出到 {Path(save_path).name}", 5000)
+            else:
+                QMessageBox.critical(self, "导出失败", "未找到可用的Excel处理库")
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", f"导出到Excel模板时发生错误:\n{e}")
+            self.status_bar.showMessage("导出失败", 3000)
 
     def open_file(self):
         """打开文件对话框选择文件"""
@@ -857,14 +1118,14 @@ class MainWindow(QMainWindow):
         # 获取屏蔽区域数据
         masked_regions_data = [{'x': r.x(), 'y': r.y(), 'width': r.width(), 'height': r.height()} for r in self.masked_regions]
         
-        # 创建OCR工作器，启用模型复用功能
+        # 创建OCR工作器
         self.ocr_worker = PaddleOCRWorker(
             self.current_file_path, 
             lang_code, 
             masked_regions_data,
             force_cpu=force_cpu,
             cpu_threads=cpu_threads,  # 传递线程数
-            reuse_model=True  # 启用模型复用，提高OCR效率
+            direct_recognition=False  # 全图OCR不使用直接识别模式
         )
         
         # 连接信号
@@ -891,10 +1152,499 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         QMessageBox.critical(self, "OCR识别错误", error_msg)
 
+    def merge_adjacent_ocr_results(self, results: List[dict]) -> List[dict]:
+        """合并可能属于同一尺寸标注的相邻OCR结果"""
+        if not results or len(results) <= 1:
+            return results
+            
+        # 按照y坐标排序结果，对于相同y坐标的，按照x坐标排序
+        # 这样可以确保同一行的文本从左到右处理
+        sorted_results = sorted(results, key=lambda r: (r.get('center_y', 0), r.get('center_x', 0)))
+        print(f"📊 排序后的OCR结果: {[(i, r.get('text', ''), r.get('center_x', 0), r.get('center_y', 0)) for i, r in enumerate(sorted_results)]}")
+        
+        # 检测所有可能是竖排文本的结果
+        vertical_texts = []
+        for i, result in enumerate(sorted_results):
+            # 检查边界框的高宽比，如果高大于宽很多，可能是竖排文本
+            bbox_width = result.get('bbox_width', 0)
+            bbox_height = result.get('bbox_height', 0)
+            if bbox_height > bbox_width * 1.5 and bbox_height > 30:  # 高宽比大于1.5且高度超过30像素
+                vertical_texts.append(i)
+                print(f"  🔍 检测到竖排文本 [{i}]: '{result.get('text', '')}' (高宽比: {bbox_height/max(1, bbox_width):.1f})")
+        
+        # 使用更复杂的合并策略，允许多次合并
+        # 首先，为每个结果分配一个组ID，初始时每个结果自己是一组
+        groups = {i: [i] for i in range(len(sorted_results))}
+        group_of_result = {i: i for i in range(len(sorted_results))}
+        
+        print("🔍 开始查找相邻文本...")
+        
+        # 预处理阶段：优先合并竖排公差文本
+        # 竖排公差文本之间的合并是最高优先级
+        print("🔍 预处理阶段：优先合并竖排公差文本...")
+        
+        # 如果有多个竖排文本，尝试合并它们
+        if len(vertical_texts) > 1:
+            for i, idx1 in enumerate(vertical_texts):
+                result1 = sorted_results[idx1]
+                text1 = result1.get('text', '').strip()
+                
+                # 只处理公差文本（+、-、0开头）
+                if not (text1.startswith(('+', '-')) or text1 == '0' or (text1.startswith('0') and len(text1) > 1)):
+                    continue
+                    
+                for j, idx2 in enumerate(vertical_texts[i+1:], i+1):
+                    result2 = sorted_results[idx2]
+                    text2 = result2.get('text', '').strip()
+                    
+                    # 只处理公差文本（+、-、0开头）
+                    if not (text2.startswith(('+', '-')) or text2 == '0' or (text2.startswith('0') and len(text2) > 1)):
+                        continue
+                    
+                    # 计算两个竖排文本之间的距离
+                    dist_x = abs(result1.get('center_x', 0) - result2.get('center_x', 0))
+                    dist_y = abs(result1.get('center_y', 0) - result2.get('center_y', 0))
+                    
+                    # 竖排文本合并也需要更严格的x轴距离判断
+                    # 特别是对于可能分散的竖排文本（如"+0"和"03"）
+                    if dist_x < 50 and dist_y < 150:  # 减小x轴阈值，原来是250
+                        print(f"    ✅ 竖排公差文本距离符合: '{text1}' 和 '{text2}' (距离: x={dist_x:.1f}, y={dist_y:.1f})")
+                        
+                        # 获取当前两个结果所在的组
+                        group_i = group_of_result[idx1]
+                        group_j = group_of_result[idx2]
+                        
+                        # 如果已经在同一组，跳过
+                        if group_i == group_j:
+                            continue
+                        
+                        # 将j所在组的所有结果合并到i所在组
+                        for idx in groups[group_j]:
+                            groups[group_i].append(idx)
+                            group_of_result[idx] = group_i
+                        
+                        # 清空j所在组
+                        groups[group_j] = []
+                        
+                        print(f"    👉 合并竖排公差文本组: {group_j} -> {group_i}, 组{group_i}现在包含: {groups[group_i]}")
+        
+        # 首先，识别所有公差文本和数值文本
+        tolerance_indices = []  # 公差文本索引
+        numeric_indices = []    # 数值文本索引
+        diameter_indices = []   # 直径符号文本索引
+        
+        for i, result in enumerate(sorted_results):
+            text = result.get('text', '').strip()
+            
+            # 检查是否是公差文本（+、-、0、±开头）
+            if (text.startswith(('+', '-', '±')) or 
+                (text.startswith('0') and len(text) > 1) or
+                text == '0'):
+                tolerance_indices.append(i)
+                print(f"  🔍 识别到公差文本 [{i}]: '{text}'")
+            
+            # 检查是否是直径符号文本
+            elif text.startswith(('Φ', '∅', 'Ø')):
+                diameter_indices.append(i)
+                print(f"  🔍 识别到直径符号文本 [{i}]: '{text}'")
+                
+                # 如果直径符号后面有数字，也将其作为数值文本
+                if re.search(r'[Φ∅Ø]\s*\d+', text):
+                    numeric_indices.append(i)
+                    print(f"  🔍 直径符号文本也包含数值，添加到数值文本列表")
+            
+            # 检查是否是纯数值文本
+            elif re.match(r'^[\d\.]+$', text):
+                numeric_indices.append(i)
+                print(f"  🔍 识别到数值文本 [{i}]: '{text}'")
+        
+        # 第一阶段：处理公差文本与左侧数值的多重匹配
+        # 允许一个公差文本与多个左侧数值匹配（上公差、下公差、基本值）
+        print("🔍 第一阶段：处理公差文本与左侧数值的多重匹配...")
+        
+        # 为每个公差文本创建一个可能的匹配列表
+        tolerance_matches = {}
+        
+        for i in tolerance_indices:
+            current = sorted_results[i]
+            current_text = current.get('text', '').strip()
+            is_current_vertical = i in vertical_texts
+            
+            print(f"  检查公差文本 [{i}]: '{current_text}' {'(竖排)' if is_current_vertical else ''}")
+            
+            # 查找所有可能匹配的左侧数值文本
+            possible_matches = []
+            
+            for j in numeric_indices:
+                other = sorted_results[j]
+                other_text = other.get('text', '').strip()
+                is_other_vertical = j in vertical_texts
+                
+                # 计算距离，但更关注水平方向的距离
+                dist_x = current.get('center_x', 0) - other.get('center_x', 0)
+                dist_y = abs(current.get('center_y', 0) - other.get('center_y', 0))
+                
+                # 竖排文本使用更宽松的距离判断
+                if is_current_vertical or is_other_vertical:
+                    # 公差应该在数值右侧，但对于竖排文本，可能有不同的排列
+                    # 所以不严格要求dist_x为正
+                    # 修改：增加x轴距离的权重，使其更加重要
+                    distance = abs(dist_x) * 2 + dist_y
+                    
+                    # 修改：减小x轴距离阈值，使匹配更加精确
+                    # 原来是250，改为更合理的50
+                    if abs(dist_x) < 50 and dist_y < 150:
+                        possible_matches.append((j, distance))
+                        print(f"    ✓ 竖排文本匹配: '{current_text}' 和 '{other_text}' (距离: x={dist_x:.1f}, y={dist_y:.1f})")
+                else:
+                    # 普通文本要求公差在数值右侧
+                    if dist_x <= 0:
+                        continue
+                    
+                    # 计算综合距离，水平距离权重更大
+                    distance = dist_x + dist_y * 2
+                    
+                    # 垂直距离不能太大
+                    if dist_y > 70:
+                        continue
+                    
+                    # 水平距离不能太大
+                    if dist_x > 200:
+                        continue
+                    
+                    possible_matches.append((j, distance))
+                    print(f"    ✓ 普通文本匹配: '{current_text}' 和 '{other_text}' (距离: x={dist_x:.1f}, y={dist_y:.1f})")
+            
+            # 按距离排序
+            possible_matches.sort(key=lambda x: x[1])
+            
+            # 最多保留前3个最近的匹配
+            best_matches = [match[0] for match in possible_matches[:3]]
+            
+            if best_matches:
+                print(f"    ✅ 公差文本 '{current_text}' 找到 {len(best_matches)} 个匹配: {[sorted_results[idx].get('text', '') for idx in best_matches]}")
+                tolerance_matches[i] = best_matches
+        
+        # 根据匹配关系，合并公差文本和数值文本
+        print("🔍 根据匹配关系合并公差文本和数值文本...")
+        
+        # 创建一个新的组结构，将公差文本和匹配的数值文本合并到同一组
+        for tolerance_idx, match_indices in tolerance_matches.items():
+            if not match_indices:
+                continue
+                
+            # 选择第一个匹配作为主组
+            main_group_id = group_of_result[match_indices[0]]
+            
+            # 将公差文本合并到主组
+            tolerance_group_id = group_of_result[tolerance_idx]
+            
+            # 如果公差文本已经在主组中，跳过
+            if tolerance_group_id == main_group_id:
+                continue
+            
+            # 将公差文本所在组的所有结果合并到主组
+            for idx in groups[tolerance_group_id]:
+                groups[main_group_id].append(idx)
+                group_of_result[idx] = main_group_id
+            
+            # 清空公差文本所在组
+            groups[tolerance_group_id] = []
+            
+            print(f"    👉 合并公差组: {tolerance_group_id} -> {main_group_id}, 组{main_group_id}现在包含: {groups[main_group_id]}")
+            
+            # 合并其他匹配的数值文本
+            for match_idx in match_indices[1:]:
+                match_group_id = group_of_result[match_idx]
+                
+                # 如果已经在主组中，跳过
+                if match_group_id == main_group_id:
+                    continue
+                
+                # 将匹配文本所在组的所有结果合并到主组
+                for idx in groups[match_group_id]:
+                    groups[main_group_id].append(idx)
+                    group_of_result[idx] = main_group_id
+                
+                # 清空匹配文本所在组
+                groups[match_group_id] = []
+                
+                print(f"    👉 合并匹配组: {match_group_id} -> {main_group_id}, 组{main_group_id}现在包含: {groups[main_group_id]}")
+        
+        # 第二阶段：处理其他常规合并情况 - 仅限公差文本
+        print("🔍 第二阶段：处理其他常规合并情况 - 仅限公差文本...")
+        for i in tolerance_indices:  # 只处理公差文本
+            current = sorted_results[i]
+            if current is None:
+                continue
+                
+            current_text = current.get('text', '').strip()
+            is_current_vertical = i in vertical_texts
+            
+            print(f"  检查公差文本 [{i}]: '{current_text}' {'(竖排)' if is_current_vertical else ''}")
+            
+            # 只与数值文本或直径文本匹配
+            for j in numeric_indices + diameter_indices:
+                if i == j:
+                    continue
+                    
+                other = sorted_results[j]
+                if other is None:
+                    continue
+                    
+                other_text = other.get('text', '').strip()
+                is_other_vertical = j in vertical_texts
+                
+                # 计算中心点距离
+                dist_x = abs(current.get('center_x', 0) - other.get('center_x', 0))
+                dist_y = abs(current.get('center_y', 0) - other.get('center_y', 0))
+                
+                # 初始化合并标志
+                should_merge = False
+                
+                # 检查文本特征
+                is_diameter = other_text.startswith(('Φ', '∅', 'Ø'))
+                is_numeric = re.match(r'^[\d\.]+$', other_text) is not None
+                
+                # 竖排文本距离判断更宽松
+                if is_current_vertical or is_other_vertical:
+                    # 竖排文本有特殊的空间关系，但需要更严格的x轴阈值
+                    x_threshold = 50  # 减小阈值，原来是250
+                    y_threshold = 150  # 保持垂直阈值不变
+                    
+                    # 检查竖排文本与其他文本的匹配关系
+                    if dist_x < x_threshold and dist_y < y_threshold:
+                        # 检查是否组成完整标注
+                        if is_diameter or is_numeric:
+                            should_merge = True
+                            print(f"    ✅ 竖排公差文本匹配: '{current_text}' 和 '{other_text}' (距离: x={dist_x:.1f}, y={dist_y:.1f})")
+                
+                # 直径符号特殊处理
+                elif is_diameter:
+                    if dist_x < 150 and dist_y < 50:
+                        should_merge = True
+                        print(f"    ✅ 公差文本与直径符号配对: '{current_text}' 和 '{other_text}' (距离: x={dist_x:.1f}, y={dist_y:.1f})")
+                
+                # 普通数值文本
+                elif is_numeric:
+                    if dist_x < 100 and dist_y < 30:
+                        should_merge = True
+                        print(f"    ✅ 公差文本与数值匹配: '{current_text}' 和 '{other_text}' (距离: x={dist_x:.1f}, y={dist_y:.1f})")
+                
+                # 如果应该合并，将两个结果合并到同一组
+                if should_merge:
+                    # 获取当前两个结果所在的组
+                    group_i = group_of_result[i]
+                    group_j = group_of_result[j]
+                    
+                    # 如果已经在同一组，跳过
+                    if group_i == group_j:
+                        continue
+                    
+                    # 将j所在组的所有结果合并到i所在组
+                    for idx in groups[group_j]:
+                        groups[group_i].append(idx)
+                        group_of_result[idx] = group_i
+                    
+                    # 清空j所在组
+                    groups[group_j] = []
+                    
+                    print(f"    👉 合并组: {group_j} -> {group_i}, 组{group_i}现在包含: {groups[group_i]}")
+        
+        # 现在我们有了分组信息，处理每个非空组
+        merged_results = []
+        
+        print("🔄 开始处理合并组...")
+        for group_id, members in groups.items():
+            if not members:  # 跳过空组
+                continue
+                
+            print(f"  处理组 {group_id}: {members}")
+            
+            if len(members) == 1:
+                # 只有一个成员，直接添加
+                merged_results.append(sorted_results[members[0]])
+                continue
+                
+            # 有多个成员，需要合并
+            # 收集组内所有文本和它们的索引，按类型分类
+            diameters = []  # 直径符号文本 (Φ, ∅, Ø)
+            minus_symbols = []  # 负号文本 (-)
+            plus_symbols = []   # 正号文本 (+)
+            pm_symbols = []     # 正负号文本 (±)
+            zeros = []          # 0开头的文本
+            numbers = []        # 纯数字文本
+            others = []         # 其他文本
+            
+            # 检查是否是竖排文本组
+            is_vertical_group = any(idx in vertical_texts for idx in members)
+            
+            # 检查是否包含公差文本
+            has_tolerance = False
+            
+            for idx in members:
+                result = sorted_results[idx]
+                text = result.get('text', '').strip()
+                
+                if text.startswith(('Φ', '∅', 'Ø')):
+                    diameters.append((idx, text))
+                elif text.startswith('-'):
+                    minus_symbols.append((idx, text))
+                    has_tolerance = True
+                elif text.startswith('+'):
+                    plus_symbols.append((idx, text))
+                    has_tolerance = True
+                elif text.startswith('±'):
+                    pm_symbols.append((idx, text))
+                    has_tolerance = True
+                elif text == '0' or (text.startswith('0') and len(text) > 1):
+                    zeros.append((idx, text))
+                    has_tolerance = True
+                elif re.match(r'^[\d\.]+$', text):
+                    numbers.append((idx, text))
+                else:
+                    others.append((idx, text))
+            
+            # 如果组内没有公差文本，且不是单个成员，则拆分回单独的结果
+            if not has_tolerance and len(members) > 1:
+                print(f"    ⚠️ 组内没有公差文本，拆分回单独的结果")
+                for idx in members:
+                    merged_results.append(sorted_results[idx])
+                continue
+            
+            # 按x坐标或y坐标排序各类文本
+            for text_list in [diameters, minus_symbols, plus_symbols, pm_symbols, zeros, numbers, others]:
+                if is_vertical_group:
+                    # 竖排文本组按y坐标排序（从上到下）
+                    text_list.sort(key=lambda item: sorted_results[item[0]].get('center_y', 0))
+                else:
+                    # 普通文本组按x坐标排序（从左到右）
+                    text_list.sort(key=lambda item: sorted_results[item[0]].get('center_x', 0))
+            
+            # 确定合并顺序，根据文本类型安排
+            # 1. 直径符号在前，后跟数字
+            # 2. 公差值按照：数值 -> 0 -> ± -> + -> -
+            
+            # 根据内容特点调整合并顺序
+            ordered_items = []
+            
+            # 如果有直径符号，优先放最前面
+            if diameters:
+                ordered_items.extend(diameters)
+            
+            # 基本数值放前面，但如果直径符号已经包含数字，则不需要额外添加数字
+            if diameters and len(diameters) > 0:
+                diameter_text = diameters[0][1]
+                # 检查直径符号文本是否已包含数字
+                if not re.search(r'[Φ∅Ø]\s*\d+', diameter_text) and numbers:
+                    ordered_items.extend(numbers)
+            else:
+                # 没有直径符号，直接添加数字
+                ordered_items.extend(numbers)
+            
+            # 竖排文本组特殊处理
+            if is_vertical_group:
+                # 对于竖排文本，可能需要特殊的顺序
+                # 例如，对于"+0.03"这种竖排文本，可能是"03"在上，"+0"在下
+                # 或者反过来，根据实际y坐标排序
+                
+                # 合并剩余的所有符号和数字
+                remaining_items = zeros + pm_symbols + plus_symbols + minus_symbols + others
+                
+                # 按y坐标排序
+                remaining_items.sort(key=lambda item: sorted_results[item[0]].get('center_y', 0))
+                
+                ordered_items.extend(remaining_items)
+            else:
+                # 普通文本使用标准顺序
+                # 公差值顺序：0 -> ± -> + -> -
+                ordered_items.extend(zeros)
+                ordered_items.extend(pm_symbols)
+                ordered_items.extend(plus_symbols)
+                ordered_items.extend(minus_symbols)
+                
+                # 其他类型放最后
+                ordered_items.extend(others)
+            
+            if not ordered_items:
+                continue
+                
+            # 获取排序后的文本和索引
+            ordered_indices = [item[0] for item in ordered_items]
+            ordered_texts = [item[1] for item in ordered_items]
+            
+            # 特殊处理：如果直径符号后面紧跟数字，需要添加空格
+            processed_texts = []
+            for i, text in enumerate(ordered_texts):
+                if i > 0 and (text == '0' or text.startswith('+') or text.startswith('-')) and \
+                   (processed_texts[-1].endswith(tuple('0123456789'))):
+                    # 在数字和公差符号之间添加空格
+                    processed_texts.append(' ' + text)
+                else:
+                    processed_texts.append(text)
+            
+            # 合并文本
+            merged_text = ''.join(processed_texts)
+            
+            print(f"    👉 合并文本: {ordered_texts} -> '{merged_text}'")
+            
+            # 创建合并后的结果
+            base_result = sorted_results[members[0]].copy()
+            base_result['text'] = merged_text
+            
+            # 更新边界框
+            all_bbox_points = []
+            for idx in members:
+                result = sorted_results[idx]
+                if 'bbox' in result:
+                    all_bbox_points.extend(result['bbox'])
+            
+            if all_bbox_points:
+                x_coords = [p[0] for p in all_bbox_points]
+                y_coords = [p[1] for p in all_bbox_points]
+                
+                min_x, max_x = min(x_coords), max(x_coords)
+                min_y, max_y = min(y_coords), max(y_coords)
+                
+                base_result['bbox'] = [
+                    [min_x, min_y],
+                    [max_x, min_y],
+                    [max_x, max_y],
+                    [min_x, max_y]
+                ]
+                
+                # 更新边界框宽高
+                base_result['bbox_width'] = max_x - min_x
+                base_result['bbox_height'] = max_y - min_y
+            
+            # 更新中心点
+            center_x_sum = sum(sorted_results[idx].get('center_x', 0) for idx in members)
+            center_y_sum = sum(sorted_results[idx].get('center_y', 0) for idx in members)
+            
+            base_result['center_x'] = center_x_sum / len(members)
+            base_result['center_y'] = center_y_sum / len(members)
+            
+            # 检查是否有竖排文本特征，设置标记
+            if is_vertical_group:
+                base_result['is_vertical'] = True
+                print(f"    ✓ 标记为竖排文本组")
+            
+            merged_results.append(base_result)
+            
+        print(f"✅ 合并完成，最终结果: {[(i, r.get('text', '')) for i, r in enumerate(merged_results)]}")
+        
+        # 返回合并后的结果
+        return merged_results
+
     def on_ocr_finished(self, results: List[dict], existing_results: List[dict] = None):
         self.ocr_button.setEnabled(True); self.ocr_button.setText("🔍 开始OCR识别")
         self.progress_bar.setVisible(False)
         if self.is_selecting_mask: self.toggle_mask_selection(False)
+        
+        # 合并相邻的OCR结果，如+0.03这种被分成多个部分的情况
+        print(f"🔍 开始合并OCR结果，原始结果数量: {len(results)}")
+        results = self.merge_adjacent_ocr_results(results)
+        print(f"✅ 合并完成，合并后结果数量: {len(results)}")
         
         # 合并现有的OCR结果和新的结果
         if existing_results:
@@ -912,6 +1662,19 @@ class MainWindow(QMainWindow):
                 if 'bbox' in r:
                     bbox_tuple = tuple(tuple(point) for point in r['bbox'])
                     if bbox_tuple not in existing_boxes:
+                        # 检测是否为竖排文本 - 检查边界框的高度和宽度
+                        if 'is_vertical' not in r and 'bbox' in r and len(r['bbox']) >= 4:
+                            points = np.array(r['bbox'])
+                            min_x, min_y = np.min(points, axis=0)
+                            max_x, max_y = np.max(points, axis=0)
+                            width = max_x - min_x
+                            height = max_y - min_y
+                            
+                            # 如果高度大于等于宽度，标记为竖排文本
+                            if height >= width:
+                                r['is_vertical'] = True
+                                print(f"✅ 自动检测到竖排文本 (尺寸: {width:.1f}x{height:.1f}, 高宽比: {height/width:.2f})")
+                        
                         new_results.append(r)
                 else:
                     new_results.append(r)
@@ -919,6 +1682,20 @@ class MainWindow(QMainWindow):
             # 合并结果
             self.ocr_results = existing_results + new_results
         else:
+            # 为新结果检测竖排文本
+            for r in results:
+                if 'is_vertical' not in r and 'bbox' in r and len(r['bbox']) >= 4:
+                    points = np.array(r['bbox'])
+                    min_x, min_y = np.min(points, axis=0)
+                    max_x, max_y = np.max(points, axis=0)
+                    width = max_x - min_x
+                    height = max_y - min_y
+                    
+                    # 如果高度大于等于宽度，标记为竖排文本
+                    if height >= width:
+                        r['is_vertical'] = True
+                        print(f"✅ 自动检测到竖排文本 (尺寸: {width:.1f}x{height:.1f}, 高宽比: {height/width:.2f})")
+            
             self.ocr_results = results
         
         # 如果是多页PDF，保存当前页的OCR结果
@@ -967,17 +1744,27 @@ class MainWindow(QMainWindow):
         for point in bbox_array[1:]: 
             path.lineTo(point[0], point[1])
         path.closeSubpath()
-        from PySide6.QtWidgets import QGraphicsPathItem
-        bbox_item = QGraphicsPathItem(path)
-        text_type = ocr_result.get('type', 'annotation')
-        color = QColor(*OCR_TEXT_TYPE_COLORS.get(text_type, OCR_TEXT_TYPE_COLORS['annotation']))
-        color.setAlpha(120)  # 设置透明度
+        
+        # 使用可调整大小的路径项
+        from ui.graphics_view import ResizableGraphicsPathItem
+        bbox_item = ResizableGraphicsPathItem(path)
+        
+        # 统一使用淡蓝色，不再区分类型或竖排文本
+        color = QColor(91, 192, 235, 120)  # 淡蓝色，与annotation类型相同
         bbox_item.setPen(QPen(color, 2))
         bbox_item.setBrush(QBrush(color))
         
         # 设置自定义属性以便识别
         bbox_item.setData(Qt.UserRole, 10000 + index)  # 使用10000+索引作为标识
         bbox_item.setData(Qt.UserRole + 1, ocr_result)  # 存储OCR结果
+        
+        # 存储原始边界框和OCR结果到自定义类
+        bbox_item.original_bbox = bbox
+        bbox_item.ocr_result = ocr_result
+        bbox_item.associated_annotations = []  # 初始化关联的气泡标注列表
+        
+        # 连接信号
+        bbox_item.bbox_updated.connect(self.on_bbox_updated)
         
         self.graphics_scene.addItem(bbox_item)
         return bbox_item
@@ -1061,8 +1848,9 @@ class MainWindow(QMainWindow):
         for result in self.ocr_results:
             # 只处理置信度高于阈值的结果
             if result.get('confidence', 0) >= confidence_threshold:
-                self.create_annotation_from_ocr_result(result)
-                created_count += 1
+                annotation = self.create_annotation_from_ocr_result(result)
+                if annotation:
+                    created_count += 1
                 
         if created_count > 0:
             # 如果是多页PDF模式，更新当前页面的标注缓存
@@ -1078,55 +1866,251 @@ class MainWindow(QMainWindow):
         self.refresh_annotation_list()
 
     def _parse_annotation_text(self, text: str) -> dict:
+        """解析标注文本，提取尺寸、类型和公差信息"""
+        result = {
+            'dimension': '',
+            'dimension_type': '',
+            'upper_tolerance': '',
+            'lower_tolerance': ''
+        }
+        
+        # 处理空文本
+        if not text:
+            return result
+            
+        # 清理文本，移除括号内容
         text_main = re.sub(r'\s*\(.*\)', '', text).strip()
-        match = re.match(r'([Φ∅øMR])\s*(\d+\.?\d*)', text_main, re.IGNORECASE)
-        if match: return {'type': '直径(Φ)', 'dimension': match.group(2)}
-        return {'type': '线性', 'dimension': text_main}
+        
+        print(f"🔍 开始解析文本: '{text_main}'")
+        
+        # 特殊处理合并后的"Φ7 0 +0.02"格式
+        # 先检查是否是这种特殊格式
+        special_match = re.match(r'([Φ∅øMR])\s*(\d+\.?\d*)\s+0\s+([+\-][\d\.]+)', text_main, re.IGNORECASE)
+        if special_match:
+            symbol = special_match.group(1).upper()
+            if symbol in ['Φ', '∅', 'Ø']:
+                result['dimension_type'] = 'Φ'
+            elif symbol == 'R':
+                result['dimension_type'] = 'R'
+            elif symbol == 'M':
+                result['dimension_type'] = 'M'
+                
+            result['dimension'] = special_match.group(2)
+            result['lower_tolerance'] = '0'
+            
+            # 处理公差值
+            tolerance = special_match.group(3)
+            if tolerance.startswith('+'):
+                result['upper_tolerance'] = tolerance
+            elif tolerance.startswith('-'):
+                result['lower_tolerance'] = tolerance
+                
+            print(f"  ✓ 特殊格式匹配成功: 符号='{symbol}', 尺寸='{result['dimension']}', 上公差='{result['upper_tolerance']}', 下公差='{result['lower_tolerance']}'")
+            return result
+            
+        # 检查直径符号
+        match = re.match(r'([Φ∅øMR])\s*(\d+\.?\d*)(.*)', text_main, re.IGNORECASE)
+        if match:
+            symbol = match.group(1).upper()
+            if symbol in ['Φ', '∅', 'Ø']:
+                result['dimension_type'] = 'Φ'
+            elif symbol == 'R':
+                result['dimension_type'] = 'R'
+            elif symbol == 'M':
+                result['dimension_type'] = 'M'
+                
+            result['dimension'] = match.group(2)
+            remaining_text = match.group(3).strip()
+            print(f"  ✓ 识别到符号: '{symbol}', 尺寸: '{result['dimension']}', 剩余文本: '{remaining_text}'")
+        else:
+            # 没有特殊符号，提取数字作为尺寸
+            number_match = re.search(r'(\d+\.?\d*)', text_main)
+            if number_match:
+                result['dimension'] = number_match.group(1)
+                remaining_text = text_main[number_match.end():].strip()
+                print(f"  ✓ 识别到尺寸: '{result['dimension']}', 剩余文本: '{remaining_text}'")
+                
+                # 检查是否包含角度符号，自动设置为角度类型
+                if '°' in remaining_text or '度' in remaining_text:
+                    result['dimension_type'] = '∠'  # 设置为角度类型符号
+                    print(f"  ✓ 检测到角度符号，自动设置尺寸类型为: '∠'")
+            else:
+                remaining_text = text_main
+                print(f"  ⚠ 未识别到尺寸, 剩余文本: '{remaining_text}'")
+        
+        # 处理合并后的公差格式 (例如: "0 +0.02" 或 "+0.02 0" 或 "0 +0.02 -0.01")
+        # 先查找是否有独立的0作为基准公差
+        zero_match = re.search(r'\b0\b', remaining_text)
+        plus_match = re.search(r'\+(\d+\.?\d*)', remaining_text)
+        minus_matches = re.findall(r'\-(\d+\.?\d*)', remaining_text)
+        
+        # 处理±格式的公差 (例如: 83.02±0.01)
+        if '±' in remaining_text:
+            parts = remaining_text.split('±')
+            if len(parts) == 2:
+                tolerance_value = parts[1].strip()
+                if tolerance_value:
+                    result['upper_tolerance'] = '+' + tolerance_value
+                    result['lower_tolerance'] = '-' + tolerance_value
+                    print(f"  ✓ 识别到±公差: '{tolerance_value}', 上公差: '{result['upper_tolerance']}', 下公差: '{result['lower_tolerance']}'")
+        
+        # 处理上下公差格式
+        else:
+            # 提取上公差
+            if plus_match:
+                result['upper_tolerance'] = '+' + plus_match.group(1)
+                print(f"  ✓ 识别到上公差: '{result['upper_tolerance']}'")
+            
+            # 处理有多个负号公差的情况（例如：两个-号表示的公差值）
+            if len(minus_matches) >= 2:
+                # 将负号后面的数值转为浮点数进行比较
+                minus_values = [float(val) for val in minus_matches]
+                
+                # 找出较大值（数值绝对值较小）和较小值（数值绝对值较大）
+                min_value = min(minus_values)
+                max_value = max(minus_values)
+                
+                # 将较小的值作为上公差（负值中，绝对值大的数值更小）
+                result['upper_tolerance'] = f"-{min_value}"
+                # 将较大的值作为下公差（负值中，绝对值小的数值更大）
+                result['lower_tolerance'] = f"-{max_value}"
+                
+                print(f"  ✓ 识别到多个负号公差: '{minus_matches}', 通过比较大小确定：上公差='{result['upper_tolerance']}', 下公差='{result['lower_tolerance']}'")
+                
+            # 处理单个负号公差
+            elif len(minus_matches) == 1:
+                result['lower_tolerance'] = '-' + minus_matches[0]
+                print(f"  ✓ 识别到下公差: '{result['lower_tolerance']}'")
+            
+            # 如果有0且没有负公差，将0设为下公差
+            elif zero_match and not result['lower_tolerance']:
+                result['lower_tolerance'] = '0'
+                print(f"  ✓ 识别到下公差为0")
+        
+        # 最终结果输出
+        print(f"📋 解析结果: 尺寸: '{result['dimension']}', 类型: '{result['dimension_type']}', 上公差: '{result['upper_tolerance']}', 下公差: '{result['lower_tolerance']}'")
+        
+        return result
         
     def create_annotation_from_ocr_result(self, ocr_result: dict):
-        parsed_data = self._parse_annotation_text(ocr_result['text'])
-        annotation_text = f"原始文本: {ocr_result['text']}"
+        """从OCR结果创建标注"""
+        if 'bbox' not in ocr_result or len(ocr_result['bbox']) < 4:
+            return None
+            
+        # 调试输出 - 检查OCR结果
+        print(f"\n🔍 调试OCR结果:")
+        for key, value in ocr_result.items():
+            if key == 'bbox':
+                print(f"  - {key}: [包含{len(value)}个点的边界框]")
+            else:
+                print(f"  - {key}: {value}")
         
-        # 更改锚点位置计算
-        if 'bbox' in ocr_result:
+        # 提取文本和置信度
+        text = ocr_result.get('text', '')
+        confidence = ocr_result.get('confidence', 0.0)
+        
+        # 检查是否为竖排文本
+        is_vertical = ocr_result.get('is_vertical', False)
+        
+        # 预处理文本 - 处理常见的OCR错误
+        # 1. 将"O"替换为"0"，如果它看起来像是数字
+        text = re.sub(r'(?<!\w)O(?!\w)', '0', text)
+        
+        # 2. 规范化直径符号
+        text = text.replace('Ø', 'Φ').replace('∅', 'Φ')
+        
+        print(f"📝 预处理后文本: '{text}'")
+        
+        # 获取边界框中心点
+        center_x = ocr_result.get('center_x')
+        center_y = ocr_result.get('center_y')
+        
+        if center_x is None or center_y is None:
+            # 如果没有中心点，则从bbox计算
             bbox = ocr_result['bbox']
-            bbox_array = np.array(bbox)
+            x_coords = [point[0] for point in bbox]
+            y_coords = [point[1] for point in bbox]
+            center_x = sum(x_coords) / len(x_coords)
+            center_y = sum(y_coords) / len(y_coords)
             
-            # 计算边界框的中心点
-            center_x = np.mean(bbox_array[:, 0])
-            center_y = np.mean(bbox_array[:, 1])
-            
-            # 计算边界框宽度
-            x_min, x_max = np.min(bbox_array[:, 0]), np.max(bbox_array[:, 0])
-            width = x_max - x_min
-            
-            # 设置锚点在文本框右侧中间位置
-            anchor_x = x_max + width * 0.2  # 向右偏移宽度的20%
-            anchor_y = center_y
-            anchor_point = QPointF(anchor_x, anchor_y)
-        else:
-            # 如果没有边界框，使用center字段
-            center = ocr_result.get('center', (0, 0))
-            anchor_point = QPointF(center[0], center[1])
+        # 尝试分析文本内容
+        parsed_data = self._parse_annotation_text(text)
         
         # 创建标注
+        anchor_point = QPointF(center_x, center_y)
+        
+        # 如果结果中没有type字段，确保添加一个默认值
+        if 'type' not in ocr_result:
+            # 尝试根据文本内容分类
+            from core.paddle_ocr_worker import PaddleOCRWorker
+            ocr_result['type'] = PaddleOCRWorker._classify_mechanical_text(None, text)
+        
+        # 检查type字段并使用
+        text_type = ocr_result.get('type', 'annotation')
+        
+        # 统一使用淡蓝色样式，不再根据类型区分颜色
+        style = 'default'
+        
+        print(f"📌 创建标注: 文本='{text}', 类型='{text_type}', 样式='{style}'")
+        
+        # 确保parsed_data中包含从OCR结果获取的维度类型信息
+        if not parsed_data.get('dimension_type'):
+            if text_type == 'diameter' or 'Φ' in text:
+                parsed_data['dimension_type'] = 'Φ'
+                print(f"  ✓ 根据类型设置尺寸类型为: 'Φ'")
+            elif text_type == 'thread_spec' or text.startswith('M'):
+                parsed_data['dimension_type'] = 'M'
+                print(f"  ✓ 根据类型设置尺寸类型为: 'M'")
+            elif text_type == 'angle' or '°' in text:
+                parsed_data['dimension_type'] = '∠'
+                print(f"  ✓ 根据类型设置尺寸类型为: '∠'")
+            else:
+                # 默认设置为直线度
+                parsed_data['dimension_type'] = '⏤'
+                print(f"  ✓ 设置默认尺寸类型为: '⏤'")
+        
+        # 如果没有解析出尺寸，但文本中有数字，尝试提取
+        if not parsed_data.get('dimension'):
+            # 提取第一个数字序列作为尺寸
+            dimension_match = re.search(r'\d+\.?\d*', text)
+            if dimension_match:
+                parsed_data['dimension'] = dimension_match.group(0)
+                print(f"  ✓ 从文本中提取尺寸: '{parsed_data['dimension']}'")
+        
+        # 创建标注对象
         annotation = self._create_new_annotation(
-            anchor_point=anchor_point,
-            text=annotation_text,
-            dimension=parsed_data.get('dimension', ''),
-            dimension_type=parsed_data.get('type', ''),
-            style=OCR_TYPE_TO_STYLE.get(ocr_result.get('type', 'annotation'), 'default')
+            anchor_point, 
+            text,
+            parsed_data.get('dimension', ''), 
+            parsed_data.get('dimension_type', ''),
+            style
         )
         
-        # 如果存在边界框信息，保存到标注项中
-        if 'bbox' in ocr_result:
-            bbox = ocr_result['bbox']
-            # 将numpy数组转换为QPointF列表
-            points = [QPointF(point[0], point[1]) for point in bbox]
-            # 调试输出
-            # print(f"OCR Text: {ocr_result['text']}, Points: {[(p.x(), p.y()) for p in points]}")
-            # 存储边界框信息
-            annotation.set_bbox_points(points)
+        # 设置公差值
+        if parsed_data.get('upper_tolerance'):
+            annotation.set_upper_tolerance(parsed_data.get('upper_tolerance'))
+            print(f"  ✓ 设置上公差: '{parsed_data.get('upper_tolerance')}'")
+        if parsed_data.get('lower_tolerance'):
+            annotation.set_lower_tolerance(parsed_data.get('lower_tolerance'))
+            print(f"  ✓ 设置下公差: '{parsed_data.get('lower_tolerance')}'")
+        
+        # 设置边界框点信息，以便箭头能够指向文本框边缘
+        if annotation and 'bbox' in ocr_result:
+            bbox_points = []
+            for point in ocr_result['bbox']:
+                bbox_points.append(QPointF(point[0], point[1]))
+            annotation.set_bbox_points(bbox_points)
+            
+            # 找到对应的OCR框图形项并建立关联
+            for item in self.graphics_scene.items():
+                if hasattr(item, 'ocr_result') and item.ocr_result is ocr_result:
+                    # 找到了对应的OCR框
+                    if hasattr(item, 'associated_annotations'):
+                        # 将当前气泡标注添加到OCR框的关联列表
+                        item.associated_annotations.append(annotation)
+                    break
+        
+        print(f"✅ 标注创建完成: ID={annotation.annotation_id}, 尺寸={annotation.dimension}, 类型={annotation.dimension_type}, 上公差={annotation.upper_tolerance}, 下公差={annotation.lower_tolerance}")
         
         return annotation
 
@@ -1246,30 +2230,31 @@ class MainWindow(QMainWindow):
         
         # 如果没有bbox，尝试根据OCR结果查找
         ocr_results = self._find_matching_ocr_results(annotation.anchor_point, annotation.text)
-        if ocr_results:
+        if ocr_results and len(ocr_results) > 0:
             # 使用OCR边界框
             best_match = ocr_results[0]
-            bbox = best_match['bbox']
-            # 计算边界框的边界
-            x_values = [point[0] for point in bbox]
-            y_values = [point[1] for point in bbox]
-            min_x = min(x_values)
-            min_y = min(y_values)
-            max_x = max(x_values)
-            max_y = max(y_values)
-            width = max_x - min_x
-            height = max_y - min_y
-            
-            # 稍微扩大一点区域，方便查看
-            padding = max(width, height) * 0.2
-            preview_rect = QRectF(
-                min_x - padding,
-                min_y - padding,
-                width + padding * 2,
-                height + padding * 2
-            )
-            print(f"从OCR结果获取预览区域: {preview_rect}")
-            return preview_rect
+            if 'bbox' in best_match and best_match['bbox']:
+                bbox = best_match['bbox']
+                # 计算边界框的边界
+                x_values = [point[0] for point in bbox]
+                y_values = [point[1] for point in bbox]
+                min_x = min(x_values)
+                min_y = min(y_values)
+                max_x = max(x_values)
+                max_y = max(y_values)
+                width = max_x - min_x
+                height = max_y - min_y
+                
+                # 稍微扩大一点区域，方便查看
+                padding = max(width, height) * 0.2
+                preview_rect = QRectF(
+                    min_x - padding,
+                    min_y - padding,
+                    width + padding * 2,
+                    height + padding * 2
+                )
+                print(f"从OCR结果获取预览区域: {preview_rect}")
+                return preview_rect
         
         # 如果没有关联OCR结果，使用锚点为中心的默认区域
         anchor_pos = annotation.anchor_point
@@ -1884,6 +2869,65 @@ class MainWindow(QMainWindow):
             return True
         return False
 
+    def on_bbox_updated(self, bbox_item):
+        """处理OCR框更新事件，更新关联的气泡标注"""
+        try:
+            if not hasattr(bbox_item, 'associated_annotations') or not bbox_item.associated_annotations:
+                return
+                
+            # 获取更新后的边界框
+            if not hasattr(bbox_item, 'ocr_result') or 'bbox' not in bbox_item.ocr_result:
+                return
+            
+            # 获取当前时间戳，用于防抖保护
+            current_time = time.time()
+            last_update = getattr(self, '_last_annotation_update_time', 0)
+            
+            # 检查是否是调整大小引起的更新
+            is_resize_update = hasattr(bbox_item, '_update_from_resize') and bbox_item._update_from_resize
+            
+            # 非调整大小更新时应用防抖
+            if not is_resize_update and (current_time - last_update) * 1000 < 50:  # 50毫秒内不重复处理
+                return
+            
+            self._last_annotation_update_time = current_time
+            
+            # 调整大小后重置标志
+            if is_resize_update:
+                bbox_item._update_from_resize = False
+                
+            # 更新所有关联的气泡标注
+            for annotation in bbox_item.associated_annotations:
+                try:
+                    # 创建QPointF列表
+                    bbox_points = []
+                    for point in bbox_item.ocr_result['bbox']:
+                        if isinstance(point, (list, tuple)) and len(point) >= 2:
+                            bbox_points.append(QPointF(point[0], point[1]))
+                    
+                    if len(bbox_points) >= 4:
+                        # 设置新的边界框点
+                        annotation.set_bbox_points(bbox_points)
+                        
+                        # 确保锚点也一起更新（在边界框中心）
+                        # 计算新的边界框中心点
+                        x_sum = sum(p.x() for p in bbox_points)
+                        y_sum = sum(p.y() for p in bbox_points)
+                        center_x = x_sum / len(bbox_points)
+                        center_y = y_sum / len(bbox_points)
+                        
+                        # 更新锚点位置
+                        annotation.anchor_point = QPointF(center_x, center_y)
+                        
+                        # 强制更新气泡几何形状
+                        annotation.prepareGeometryChange()
+                        annotation._update_geometry()
+                        annotation.update()
+                except Exception as e:
+                    print(f"更新气泡标注 {annotation.annotation_id} 时出错: {e}")
+        except Exception as e:
+            print(f"处理OCR框更新事件时出错: {e}")
+
     def run_ocr_on_selected_area(self, rect: QRectF):
         """对选中区域进行OCR识别"""
         if not HAS_OCR_SUPPORT:
@@ -1895,7 +2939,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "提示", "请先打开图片文件。")
             return
         
-        # 默认直接使用直接识别模式，不显示弹窗询问
+        # 始终使用直接识别模式，不调用检测模型
         direct_recognition = True
             
         # 从当前图像中截取选定区域
@@ -1907,41 +2951,6 @@ class MainWindow(QMainWindow):
         width = min(int(width), self.current_pixmap.width() - x)
         height = min(int(height), self.current_pixmap.height() - y)
         
-        # 【新增优化】：如果已有OCR结果，检查是否有位于选定区域内的结果
-        # 直接识别模式不重用已有结果
-        if self.ocr_results and not direct_recognition:
-            # 创建选定区域的QRectF对象
-            selected_rect = QRectF(x, y, width, height)
-            
-            # 查找位于选定区域内的OCR结果
-            overlapping_results = []
-            for result in self.ocr_results:
-                if 'bbox' in result:
-                    bbox = result['bbox']
-                    if len(bbox) >= 4:
-                        # 计算OCR框的边界矩形
-                        x_coords = [point[0] for point in bbox]
-                        y_coords = [point[1] for point in bbox]
-                        x_min = min(x_coords)
-                        y_min = min(y_coords)
-                        x_max = max(x_coords)
-                        y_max = max(y_coords)
-                        bbox_rect = QRectF(x_min, y_min, x_max - x_min, y_max - y_min)
-                        
-                        # 检查是否与选定区域重叠
-                        if selected_rect.intersects(bbox_rect):
-                            # 创建结果副本，保留原始坐标
-                            result_copy = result.copy()
-                            overlapping_results.append(result_copy)
-            
-            # 如果有重叠的OCR结果，直接使用它们
-            if overlapping_results:
-                print(f"✅ 找到 {len(overlapping_results)} 个现有OCR结果在选定区域内，直接使用")
-                self.on_area_ocr_finished(overlapping_results, rect, "", 0, 0)
-                return
-            else:
-                print("❌ 选定区域内没有现有OCR结果，执行新的OCR识别")
-        
         # 创建临时文件保存选定区域
         import tempfile
         import os
@@ -1952,30 +2961,20 @@ class MainWindow(QMainWindow):
         # 截取并保存区域图像
         cropped_pixmap = self.current_pixmap.copy(x, y, width, height)
         
-        # 询问用户是否为竖排文本
-        rotation_choice = QMessageBox.question(
-            self, "文本方向", "选中区域是否为竖排文本？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
+        # 自动判断是否为竖排文本 - 如果高度大于等于宽度，则认为是竖排文本
+        is_vertical = height >= width  # 高度大于等于宽度时认为是竖排文本
         
-        # 用于识别的图像，可能会被旋转
-        ocr_pixmap = cropped_pixmap.copy()
-        is_vertical = False
-        
-        # 如果是竖排文本，旋转用于识别的图像副本
-        if rotation_choice == QMessageBox.Yes:
-            from PySide6.QtGui import QTransform
-            ocr_pixmap = ocr_pixmap.transformed(QTransform().rotate(90))
-            is_vertical = True
-            print("✅ 已旋转图像以适应竖排文本（仅用于识别）")
+        if is_vertical:
+            print(f"✅ 自动检测到竖排文本 (尺寸: {width}x{height}, 高宽比: {height/width:.2f})")
+            self.status_bar.showMessage(f"检测到竖排文本，将自动旋转识别 (高宽比: {height/width:.2f})", 3000)
+        else:
+            print(f"✅ 自动检测到横排文本 (尺寸: {width}x{height}, 高宽比: {height/width:.2f})")
+            self.status_bar.showMessage(f"检测到横排文本 (高宽比: {height/width:.2f})", 3000)
         
         # 保存处理后的图像用于OCR
-        ocr_pixmap.save(temp_path)
+        cropped_pixmap.save(temp_path)
         
-        if direct_recognition:
-            self.status_bar.showMessage("正在对选中区域进行直接OCR识别...")
-        else:
-            self.status_bar.showMessage("正在对选中区域进行OCR识别...")
+        self.status_bar.showMessage("正在对选中区域进行直接OCR识别（跳过检测模型）...")
         
         # 获取语言配置
         lang_text = self.language_combo.currentText()
@@ -1988,15 +2987,14 @@ class MainWindow(QMainWindow):
         # 获取CPU线程数
         cpu_threads = self.threads_spinbox.value()
         
-        # 创建区域OCR工作器，启用模型复用功能
+        # 创建区域OCR工作器
         self.area_ocr_worker = PaddleOCRWorker(
             temp_path, 
             lang_code, 
             [],  # 区域识别不需要屏蔽区域
             force_cpu=force_cpu,
             cpu_threads=cpu_threads,  # 传递线程数
-            reuse_model=True,  # 启用模型复用，提高区域OCR效率
-            direct_recognition=direct_recognition  # 设置是否直接识别
+            direct_recognition=direct_recognition  # 设置为直接识别模式，跳过检测模型
         )
         
         # 设置竖排文本标记
@@ -2034,7 +3032,7 @@ class MainWindow(QMainWindow):
         QMessageBox.warning(self, "区域OCR识别错误", error_msg)
         self.area_select_action.setChecked(False)
     
-    def on_area_ocr_finished(self, results: List[dict], rect: QRectF, temp_path: str, offset_x: int, offset_y: int, is_vertical: bool = False):
+    def on_area_ocr_finished(self, results: List[dict], rect: QRectF, temp_path: str, offset_x: int, offset_y: int, is_vertical: bool):
         """区域OCR完成处理"""
         self.progress_bar.setVisible(False)
         
@@ -2050,26 +3048,42 @@ class MainWindow(QMainWindow):
             self.create_annotation_in_area(rect)
             self.area_select_action.setChecked(False)
             return
+            
+        # 合并相邻的OCR结果，如+0.03这种被分成多个部分的情况
+        results = self.merge_adjacent_ocr_results(results)
         
-        # 强制所有结果使用原始选择的区域边界框，保持UI一致性
-        original_rect = rect
-        
-        # 为每个结果设置与原始区域一致的边界框
+        # 调整结果坐标（添加偏移量）
         for result in results:
-            # 使用原始选择框作为识别框
-            result['bbox'] = [
-                [original_rect.x(), original_rect.y()],  # 左上
-                [original_rect.x() + original_rect.width(), original_rect.y()],  # 右上
-                [original_rect.x() + original_rect.width(), original_rect.y() + original_rect.height()],  # 右下
-                [original_rect.x(), original_rect.y() + original_rect.height()]   # 左下
-            ]
+            if 'bbox' in result:
+                adjusted_bbox = []
+                
+                # 获取选择区域的宽度和高度，用于竖排文本的坐标转换
+                rect_width = int(rect.width())
+                rect_height = int(rect.height())
+                
+                for point in result['bbox']:
+                    if is_vertical:
+                        # 竖排文本情况下，需要将旋转后的坐标转换回原始坐标系统
+                        # 图像旋转了90度顺时针，经过多次尝试修正后的变换公式：
+                        original_x = offset_x + point[1]
+                        original_y = offset_y + point[0]  # 简化变换，尝试直接使用旋转后的x作为y的偏移
+                        adjusted_bbox.append([original_x, original_y])
+                    else:
+                        # 正常情况下只添加偏移量
+                        adjusted_bbox.append([point[0] + offset_x, point[1] + offset_y])
+                
+                result['bbox'] = adjusted_bbox
             
-            # 设置中心点
-            result['center_x'] = original_rect.x() + original_rect.width() / 2
-            result['center_y'] = original_rect.y() + original_rect.height() / 2
-            
-            # 标记是否为竖排文本，以便后续处理
-            result['is_vertical'] = is_vertical
+            if 'center_x' in result and 'center_y' in result:
+                if is_vertical:
+                    # 同样需要转换中心点坐标
+                    original_center_x = offset_x + result['center_y']
+                    original_center_y = offset_y + result['center_x']
+                    result['center_x'] = original_center_x
+                    result['center_y'] = original_center_y
+                else:
+                    result['center_x'] += offset_x
+                    result['center_y'] += offset_y
         
         # 创建底色显示区域 - 与全局OCR一样显示识别区域
         for i, result in enumerate(results):
@@ -2082,8 +3096,9 @@ class MainWindow(QMainWindow):
         for result in results:
             if result.get('confidence', 0) >= confidence_threshold:
                 # 修改为使用相对于场景的正确坐标创建标注
-                self.create_annotation_from_ocr_result(result)
-                created_count += 1
+                annotation = self.create_annotation_from_ocr_result(result)
+                if annotation:
+                    created_count += 1
         
         # 将识别结果添加到全局OCR结果中，以便筛选和管理
         self.ocr_results.extend(results)
@@ -2120,7 +3135,7 @@ class MainWindow(QMainWindow):
 
     def _find_matching_ocr_results(self, anchor_point, annotation_text):
         """多策略匹配OCR结果 - 优化版，更严格的标准避免误匹配"""
-        matching_indices = []
+        matching_results = []
         
         # 从文本中提取原始OCR文本（如果有）
         original_ocr_text = None
@@ -2130,7 +3145,7 @@ class MainWindow(QMainWindow):
                 original_ocr_text = parts[1].strip()
         
         # 确保只找到最匹配的一个OCR结果
-        best_match_index = -1
+        best_match = None
         best_match_score = float('inf')  # 分数越小越匹配
         
         # 遍历所有OCR结果
@@ -2142,12 +3157,12 @@ class MainWindow(QMainWindow):
                 ocr_text = ocr_result['text']
                 if ocr_text == original_ocr_text:
                     # 完全匹配，这是最优先级
-                    matching_indices = [i]
-                    return matching_indices
+                    matching_results = [ocr_result]
+                    return matching_results
                 elif ocr_text.strip() == original_ocr_text.strip():
                     # 除了空格外完全匹配
-                    matching_indices = [i]
-                    return matching_indices
+                    matching_results = [ocr_result]
+                    return matching_results
             
             # 策略2: 位置匹配 - 当没有完全文本匹配时，计算最近的一个
             if 'bbox' in ocr_result:
@@ -2176,14 +3191,14 @@ class MainWindow(QMainWindow):
             # 如果这个OCR结果比之前找到的更匹配，更新最佳匹配
             if current_score < best_match_score:
                 best_match_score = current_score
-                best_match_index = i
+                best_match = ocr_result
         
         # 只有当最佳匹配的距离小于阈值时才返回结果
         # 使用固定阈值80像素，更严格的匹配标准
-        if best_match_index >= 0 and best_match_score < 80:
-            matching_indices.append(best_match_index)
+        if best_match is not None and best_match_score < 80:
+            matching_results.append(best_match)
         
-        return matching_indices
+        return matching_results
 
     def convert_pdf_to_images(self):
         """将PDF文件批量转换为PNG图片"""
@@ -2777,54 +3792,3 @@ class MainWindow(QMainWindow):
             self.size_slider.setValue(new_size)
         except ValueError:
             QMessageBox.warning(self, "输入错误", "请输入有效的数字。")
-
-    def _detect_text_orientation(self, pixmap):
-        """
-        自动检测图像中文本的方向（横排或竖排）
-        返回True表示检测为竖排文本，False表示横排文本
-        """
-        try:
-            # 将QPixmap转换为numpy数组进行处理
-            qimage = pixmap.toImage()
-            width, height = qimage.width(), qimage.height()
-            ptr = qimage.constBits()
-            ptr.setsize(height * width * 4)
-            
-            # 转换为灰度图像进行处理
-            import numpy as np
-            import cv2
-            
-            arr = np.array(ptr).reshape(height, width, 4)
-            gray = cv2.cvtColor(arr, cv2.COLOR_RGBA2GRAY)
-            
-            # 应用阈值处理，转换为二值图像
-            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            
-            # 计算水平和垂直投影
-            h_proj = np.sum(binary, axis=1)
-            v_proj = np.sum(binary, axis=0)
-            
-            # 计算投影的方差
-            h_var = np.var(h_proj)
-            v_var = np.var(v_proj)
-            
-            # 如果垂直投影的方差显著大于水平投影的方差，则可能是竖排文本
-            is_vertical = v_var > (h_var * 1.2)
-            
-            print(f"📊 文本方向分析: 水平方差={h_var:.2f}, 垂直方差={v_var:.2f}")
-            print(f"🔄 检测结果: {'竖排' if is_vertical else '横排'}文本")
-            
-            # 如果区域比例是明显的长条形，也可以辅助判断
-            aspect_ratio = width / height
-            if aspect_ratio < 0.5:  # 高度远大于宽度
-                is_vertical = is_vertical or True
-                print(f"📏 宽高比分析: {aspect_ratio:.2f} (细高区域，更可能是竖排文本)")
-            elif aspect_ratio > 2.0:  # 宽度远大于高度
-                is_vertical = False
-                print(f"📏 宽高比分析: {aspect_ratio:.2f} (扁平区域，更可能是横排文本)")
-                
-            return is_vertical
-        
-        except Exception as e:
-            print(f"⚠️ 自动检测文本方向出错: {e}")
-            return False  # 出错时默认为横排文本

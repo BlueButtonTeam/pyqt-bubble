@@ -16,7 +16,7 @@ ezdxf>=1.0.0
 # 移除EasyOCR依赖，专注使用PaddleOCR
 
 # OCR引擎 - PaddleOCR (主要方案) - 修改为GPU版本
-paddlepaddle-gpu==2.6.1
+paddlepaddle==2.6.1
 paddleocr==2.9.0
 
 # PaddleOCR相关依赖 - 使用您当前环境的版本
@@ -50,6 +50,7 @@ opt-einsum
 six>=1.16.0
 requests>=2.25.0
 openpyxl>=3.1.0
+xlwings
 
 # 注意事项:
 # 1. 本requirements.txt专为PaddleOCR + PyQt应用设计

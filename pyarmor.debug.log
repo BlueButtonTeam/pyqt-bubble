@@ -1,0 +1,95 @@
+2025-07-15 16:11:49,952 Python 3.13.3
+2025-07-15 16:11:49,952 Pyarmor 9.1.7 (trial), 000000, non-profits
+2025-07-15 16:11:49,977 Platform windows.x86_64
+2025-07-15 16:11:49,977 native platform windows.amd64
+2025-07-15 16:11:49,977 home path: C:\Users\H\.pyarmor
+2025-07-15 16:11:49,977 args: ['-d', 'gen', '--recursive', '--exclude', 'ppocr', '--exclude', 'PyQt5', '--output', '.\\encrypted_code', '.\\main.py', '.\\run.py', '.\\core', '.\\ui', '.\\utils']
+2025-07-15 16:11:49,977 command options: {'recursive': True, 'output': '.\\encrypted_code', 'no_runtime': False, 'inputs': ['main.py', 'run.py', 'core', 'ui', 'utils'], 'excludes': 'ppocr PyQt5'}
+2025-07-15 16:11:49,978 install plugin: CodesignPlugin
+2025-07-15 16:11:49,978 install plugin: DarwinUniversalPlugin
+2025-07-15 16:11:49,978 search inputs ...
+2025-07-15 16:11:49,978 find script main.py
+2025-07-15 16:11:49,978 find script run.py
+2025-07-15 16:11:49,978 find package at core
+2025-07-15 16:11:49,979 find package at ui
+2025-07-15 16:11:49,980 find package at utils
+2025-07-15 16:11:49,980 find 5 top resources
+2025-07-15 16:11:50,065 start to generate runtime files
+2025-07-15 16:11:50,065 target platforms {'windows.amd64'}
+2025-07-15 16:11:50,100 got C:\Users\H\AppData\Local\Programs\Python\Python313\Lib\site-packages\pyarmor\cli\core\pyarmor_runtime.pyd
+2025-07-15 16:11:50,100 write .\encrypted_code\pyarmor_runtime_000000\pyarmor_runtime.pyd
+2025-07-15 16:11:50,100 patching runtime data at 533536
+2025-07-15 16:11:50,101 patch runtime file OK
+2025-07-15 16:11:50,101 call post runtime plugin <class 'pyarmor.cli.plugin.CodesignPlugin'>
+2025-07-15 16:11:50,102 generate runtime files OK
+2025-07-15 16:11:50,102 start to obfuscate scripts
+2025-07-15 16:11:50,102 process resource "main"
+2025-07-15 16:11:50,102 obfuscating file main.py
+2025-07-15 16:11:50,103 process inline marker
+2025-07-15 16:11:50,103 parse script
+2025-07-15 16:11:50,104 process co
+2025-07-15 16:11:50,106 patch co
+2025-07-15 16:11:50,108 write .\encrypted_code\main.py
+2025-07-15 16:11:50,109 process resource "run"
+2025-07-15 16:11:50,109 obfuscating file run.py
+2025-07-15 16:11:50,110 process inline marker
+2025-07-15 16:11:50,110 parse script
+2025-07-15 16:11:50,111 process co
+2025-07-15 16:11:50,112 patch co
+2025-07-15 16:11:50,116 write .\encrypted_code\run.py
+2025-07-15 16:11:50,117 process resource "core"
+2025-07-15 16:11:50,117 obfuscating file annotation_item.py
+2025-07-15 16:11:50,118 process inline marker
+2025-07-15 16:11:50,118 parse script
+2025-07-15 16:11:50,123 process co
+2025-07-15 16:11:50,145 patch co
+2025-07-15 16:11:50,181 write .\encrypted_code\core\annotation_item.py
+2025-07-15 16:11:50,182 obfuscating file file_loader.py
+2025-07-15 16:11:50,183 process inline marker
+2025-07-15 16:11:50,184 parse script
+2025-07-15 16:11:50,188 process co
+2025-07-15 16:11:50,204 patch co
+2025-07-15 16:11:50,232 write .\encrypted_code\core\file_loader.py
+2025-07-15 16:11:50,232 obfuscating file ocr_worker.py
+2025-07-15 16:11:50,235 process inline marker
+2025-07-15 16:11:50,235 parse script
+2025-07-15 16:11:50,241 process co
+2025-07-15 16:11:50,269 patch co
+2025-07-15 16:11:50,313 write .\encrypted_code\core\ocr_worker.py
+2025-07-15 16:11:50,314 obfuscating file paddle_ocr_worker.py
+2025-07-15 16:11:50,317 process inline marker
+2025-07-15 16:11:50,317 parse script
+2025-07-15 16:11:50,324 process co
+2025-07-15 16:11:50,337 patch co
+2025-07-15 16:11:50,360 write .\encrypted_code\core\paddle_ocr_worker.py
+2025-07-15 16:11:50,361 obfuscating file undo_commands.py
+2025-07-15 16:11:50,362 process inline marker
+2025-07-15 16:11:50,362 parse script
+2025-07-15 16:11:50,364 process co
+2025-07-15 16:11:50,377 patch co
+2025-07-15 16:11:50,401 write .\encrypted_code\core\undo_commands.py
+2025-07-15 16:11:50,402 obfuscating file __init__.py
+2025-07-15 16:11:50,403 process inline marker
+2025-07-15 16:11:50,403 parse script
+2025-07-15 16:11:50,404 process co
+2025-07-15 16:11:50,404 patch co
+2025-07-15 16:11:50,404 write .\encrypted_code\core\__init__.py
+2025-07-15 16:11:50,405 process resource "ui"
+2025-07-15 16:11:50,405 obfuscating file annotation_list.py
+2025-07-15 16:11:50,406 process inline marker
+2025-07-15 16:11:50,406 parse script
+2025-07-15 16:11:50,407 process co
+2025-07-15 16:11:50,414 patch co
+2025-07-15 16:11:50,425 write .\encrypted_code\ui\annotation_list.py
+2025-07-15 16:11:50,426 obfuscating file graphics_view.py
+2025-07-15 16:11:50,427 process inline marker
+2025-07-15 16:11:50,427 parse script
+2025-07-15 16:11:50,430 process co
+2025-07-15 16:11:50,450 patch co
+2025-07-15 16:11:50,484 write .\encrypted_code\ui\graphics_view.py
+2025-07-15 16:11:50,485 obfuscating file main_window.py
+2025-07-15 16:11:50,488 process inline marker
+2025-07-15 16:11:50,488 parse script
+2025-07-15 16:11:50,556 process co
+2025-07-15 16:11:50,674 patch co
+2025-07-15 16:11:50,888 out of license

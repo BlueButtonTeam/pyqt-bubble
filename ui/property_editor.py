@@ -67,11 +67,11 @@ class PropertyEditor(QWidget):
         form_layout.addRow("尺寸:", self.dimension_edit)
 
         self.type_combo = QComboBox()
-        self.type_combo.addItem("")  # 空选项
-        self.type_combo.addItem("⏤")  # 直线度 (Straightness)
-        self.type_combo.addItem("⏥")  # 平面度 (Flatness)
+        self.type_combo.addItem("⏤")  # 直线度 (Straightness) - 默认
         self.type_combo.addItem("⌀")  # 直径符号 (Diameter)
         self.type_combo.addItem("R")  # 半径 (Radius)
+        self.type_combo.addItem("M")  # 公制螺纹 (Metric Thread)
+        self.type_combo.addItem("⏥")  # 平面度 (Flatness)
         self.type_combo.addItem("⌒")  # 圆弧 (Arc)
         self.type_combo.addItem("⌓")  # 线段 (Segment)
         self.type_combo.addItem("⋭")  # 圆柱度 (Cylindricity)
@@ -83,8 +83,7 @@ class PropertyEditor(QWidget):
         self.type_combo.addItem("⌳")  # 斜度 (Slope)
         self.type_combo.addItem("⌴")  # 反锥孔 (Counterbore)
         self.type_combo.addItem("⌵")  # 沉孔 (Countersink)
-        self.type_combo.addItem("°")  # 角度 (Angle)
-        self.type_combo.addItem("M")  # 公制螺纹 (Metric Thread)
+        self.type_combo.addItem("∠")  # 角度 (Angle)
         
         # 设置符号下拉框样式
         self.type_combo.setStyleSheet("""
@@ -208,8 +207,8 @@ class PropertyEditor(QWidget):
                 self.type_combo.setCurrentText("⌀")
             elif dim_type == "半径(R)" or dim_type == "R":
                 self.type_combo.setCurrentText("R")
-            elif dim_type == "角度(°)" or dim_type == "°":
-                self.type_combo.setCurrentText("°")
+            elif dim_type == "角度(°)" or dim_type == "°" or dim_type == "∠":
+                self.type_combo.setCurrentText("∠")
             elif dim_type == "线性":
                 self.type_combo.setCurrentText("⏤")
             elif dim_type == "螺纹":
